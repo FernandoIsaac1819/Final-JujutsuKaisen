@@ -1,0 +1,38 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: de7bc3c710ee0c643911bb0488e82909, type: 3}
+  m_Name: Light Attack 2
+  m_EditorClassIdentifier: Assembly-CSharp::AttackMoveData
+  animatorStateName: Light 2
+  blendInDuration: 0.05
+  hitboxActiveStart: 0.09546378
+  hitboxActiveEnd: 0.37754434
+  hitboxForwardOffset: 1.2
+  hitboxHeightOffset: 1
+  hitboxRadius: 0.8
+  forwardSteps:
+  - triggerTime: 0.06240488
+    distance: 2
+    duration: 0.15
+  - triggerTime: 0.73110104
+    distance: 2
+    duration: 0.15
+  reactionWindowDuration: 0.15
+  parryThreshold: 0.05
+  damage: 10
+  hitstunDuration: 0.3
+  knockback: 0
+  knockbackForce: 4
+  nextOnLight: {fileID: 11400000, guid: 6e024ceb5c88ec64fb63f7680160dc83, type: 2}
+  nextOnHeavy: {fileID: 11400000, guid: f1e25c25235906a48a8bb6eca3d1de9b, type: 2}
+  advancedUnlock: {fileID: 0}
+  isAdvanced: 0
