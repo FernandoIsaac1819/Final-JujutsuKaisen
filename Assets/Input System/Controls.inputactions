@@ -16,10 +16,10 @@
                     "initialStateCheck": true
                 },
                 {
-                    "name": "Look",
-                    "type": "Value",
+                    "name": "Lock",
+                    "type": "Button",
                     "id": "6b444451-8a00-4d00-a97e-f47457f736a8",
-                    "expectedControlType": "Vector2",
+                    "expectedControlType": "",
                     "processors": "",
                     "interactions": "",
                     "initialStateCheck": true
@@ -86,6 +86,15 @@
                     "processors": "",
                     "interactions": "",
                     "initialStateCheck": false
+                },
+                {
+                    "name": "Look",
+                    "type": "Value",
+                    "id": "2d62250b-a0a9-4059-926c-237060e29163",
+                    "expectedControlType": "Vector2",
+                    "processors": "",
+                    "interactions": "",
+                    "initialStateCheck": true
                 }
             ],
             "bindings": [
@@ -156,79 +165,24 @@
                     "isPartOfComposite": true
                 },
                 {
-                    "name": "ARROWS",
-                    "id": "e87dd1ec-cec9-4b18-9cf6-afa998c80bc9",
-                    "path": "2DVector",
-                    "interactions": "",
-                    "processors": "",
-                    "groups": "",
-                    "action": "Move",
-                    "isComposite": true,
-                    "isPartOfComposite": false
-                },
-                {
-                    "name": "up",
-                    "id": "1b3ef563-b49b-4532-ab30-88738a736efe",
-                    "path": "<Keyboard>/upArrow",
-                    "interactions": "",
-                    "processors": "",
-                    "groups": "",
-                    "action": "Move",
-                    "isComposite": false,
-                    "isPartOfComposite": true
-                },
-                {
-                    "name": "down",
-                    "id": "48b0c6fe-122e-4e38-8d1d-91fdb83cd635",
-                    "path": "<Keyboard>/downArrow",
-                    "interactions": "",
-                    "processors": "",
-                    "groups": "",
-                    "action": "Move",
-                    "isComposite": false,
-                    "isPartOfComposite": true
-                },
-                {
-                    "name": "left",
-                    "id": "db533a9e-2406-430f-9b0e-d27972d53b84",
-                    "path": "<Keyboard>/leftArrow",
-                    "interactions": "",
-                    "processors": "",
-                    "groups": "",
-                    "action": "Move",
-                    "isComposite": false,
-                    "isPartOfComposite": true
-                },
-                {
-                    "name": "right",
-                    "id": "29bba54a-7630-4a4c-8a87-357025312fad",
-                    "path": "<Keyboard>/rightArrow",
-                    "interactions": "",
-                    "processors": "",
-                    "groups": "",
-                    "action": "Move",
-                    "isComposite": false,
-                    "isPartOfComposite": true
-                },
-                {
                     "name": "",
                     "id": "c1f7a91b-d0fd-4a62-997e-7fb9b69bf235",
-                    "path": "<Gamepad>/rightStick",
+                    "path": "<DualShockGamepad>/rightStickPress",
                     "interactions": "",
                     "processors": "",
                     "groups": ";Gamepad",
-                    "action": "Look",
+                    "action": "Lock",
                     "isComposite": false,
                     "isPartOfComposite": false
                 },
                 {
                     "name": "",
-                    "id": "23c4c78d-6865-4f08-a333-cfaf82d7c82b",
-                    "path": "<Mouse>/delta",
+                    "id": "bde72a66-79d5-403b-b420-859c39d38672",
+                    "path": "<Keyboard>/l",
                     "interactions": "",
                     "processors": "",
                     "groups": "",
-                    "action": "Look",
+                    "action": "Lock",
                     "isComposite": false,
                     "isPartOfComposite": false
                 },
@@ -385,6 +339,50 @@
                     "action": "Heavy Attack",
                     "isComposite": false,
                     "isPartOfComposite": false
+                },
+                {
+                    "name": "",
+                    "id": "8c6d9ef2-4040-48a6-9410-b388f8352d2c",
+                    "path": "<Gamepad>/rightStick",
+                    "interactions": "",
+                    "processors": "",
+                    "groups": "",
+                    "action": "Look",
+                    "isComposite": false,
+                    "isPartOfComposite": false
+                },
+                {
+                    "name": "2D Vector",
+                    "id": "b21c334d-2018-4a0e-8a8d-fd10f7764971",
+                    "path": "2DVector",
+                    "interactions": "",
+                    "processors": "",
+                    "groups": "",
+                    "action": "Look",
+                    "isComposite": true,
+                    "isPartOfComposite": false
+                },
+                {
+                    "name": "left",
+                    "id": "4a63fe56-ca41-4bd0-b5f5-9a1bf2530c3e",
+                    "path": "<Keyboard>/leftArrow",
+                    "interactions": "",
+                    "processors": "",
+                    "groups": "",
+                    "action": "Look",
+                    "isComposite": false,
+                    "isPartOfComposite": true
+                },
+                {
+                    "name": "right",
+                    "id": "6bb23290-d575-4918-a82e-d800a4f060c7",
+                    "path": "<Keyboard>/rightArrow",
+                    "interactions": "",
+                    "processors": "",
+                    "groups": "",
+                    "action": "Look",
+                    "isComposite": false,
+                    "isPartOfComposite": true
                 }
             ]
         },

@@ -63,16 +63,31 @@ public class ComboController : MonoBehaviour
     [SerializeField] private float rushHoldThreshold = 0.4f;
 
     private AttackMoveData currentMove;
-    private bool currentMoveHasHit;
-    private bool inPunishWindow; // true once the hitbox-active portion ends — the recovery frames ARE the window
-    private bool advancedGateArmed; // true if the move that just finished both gates Advanced and connected
+    private readonly List<bool> hitEventFired = new List<bool>(); // parallel to currentMove.HitEvents, reused across moves
+    private bool inPunishWindow; // true once the LAST hit event's tolerance window has passed — the recovery frames ARE the window
+    private bool advancedGateArmed; // true if the move that just finished both gates Advanced and connected (any hit event)
     private float activeMoveTimer; // real elapsed seconds since the current move started
     private readonly List<bool> stepFired = new List<bool>(); // parallel to currentMove.ForwardSteps, reused across moves
-    private bool isChargingLight;   // true between a fresh Light press and the tap/hold decision
+    private bool isChargingLight;   // true between a Light press and its release
     private float lightHoldTimer;
+    private bool isChargingHeavy;   // true between a Heavy press and its release
 
     public bool IsAttacking => currentMove != null;
     public bool InPunishWindow => inPunishWindow;
+
+    /// The latest point (normalized time) any hit event's tolerance window ends at — 0 if
+    /// the move has no hit events at all, in which case the punish window opens immediately.
+    private float LastHitEventWindowEnd(AttackMoveData move)
+    {
+        float latest = 0f;
+        for (int i = 0; i < move.HitEvents.Count; i++)
+        {
+            AttackMoveData.HitEvent hit = move.HitEvents[i];
+            float end = hit.triggerTime + hit.activeWindow / 2f;
+            if (end > latest) latest = end;
+        }
+        return latest;
+    }
 
     /// 1 = window just opened, 0 = about to close. Window duration is implicit — whatever's
     /// left of the current clip after its hitbox-active portion ends, not a separately
@@ -84,7 +99,7 @@ public class ComboController : MonoBehaviour
             if (!inPunishWindow || currentMove == null || animator == null) return 0f;
 
             float clipLength = animator.GetCurrentAnimatorStateInfo(0).length;
-            float recoveryStart = clipLength * currentMove.HitboxActiveEnd;
+            float recoveryStart = clipLength * LastHitEventWindowEnd(currentMove);
             float recoveryDuration = clipLength - recoveryStart;
             if (recoveryDuration <= 0f) return 0f;
 
@@ -103,6 +118,7 @@ public class ComboController : MonoBehaviour
         input.LightAttackEvent += OnLightPressed;
         input.LightAttackCanceledEvent += OnLightReleased;
         input.HeavyAttackEvent += OnHeavyPressed;
+        input.HeavyAttackCanceledEvent += OnHeavyReleased;
     }
 
     private void OnDisable()
@@ -110,53 +126,135 @@ public class ComboController : MonoBehaviour
         input.LightAttackEvent -= OnLightPressed;
         input.LightAttackCanceledEvent -= OnLightReleased;
         input.HeavyAttackEvent -= OnHeavyPressed;
+        input.HeavyAttackCanceledEvent -= OnHeavyReleased;
     }
 
+    /// Both fresh-entry and mid-combo chain presses wait for release before actually
+    /// firing, rather than triggering instantly — this is what lays the groundwork for a
+    /// future charge attack (hold longer = stronger), even though that scaling isn't built
+    /// yet; right now, holding past rushHoldThreshold before releasing is the only thing
+    /// hold duration affects (Rush vs normal entry). Gate checks happen at press time (so
+    /// an invalid press doesn't even start a charge) AND are re-checked fresh at release
+    /// time (so a state change during the hold — e.g. the punish window closing — is
+    /// handled correctly instead of firing into a now-invalid state).
     private void OnLightPressed()
     {
         if (currentMove == null)
         {
-            if (playerController != null && !playerController.CanAttack) return;
-            // Don't commit yet — wait to see if this becomes a tap (released early) or a
-            // hold (crosses rushHoldThreshold while still down). Only the fresh-entry case
-            // needs this; continuing an existing string is still fully instant, below.
-            isChargingLight = true;
-            lightHoldTimer = 0f;
-            return;
+            if (playerController != null && !playerController.CanAttack)
+            {
+                Debug.Log($"[OnLightPressed] Frame {Time.frameCount}: REJECTED (fresh entry, CanAttack=false)");
+                return;
+            }
+        }
+        else
+        {
+            if (currentMove.IsAdvanced)
+            {
+                Debug.Log($"[OnLightPressed] Frame {Time.frameCount}: REJECTED ('{currentMove.name}' IsAdvanced)");
+                return;
+            }
+            if (!inPunishWindow)
+            {
+                Debug.Log($"[OnLightPressed] Frame {Time.frameCount}: REJECTED ('{currentMove.name}' inPunishWindow=false, activeMoveTimer={activeMoveTimer:F4})");
+                return;
+            }
         }
 
-        if (currentMove.IsAdvanced) return; // Advanced ignores input entirely — fully automatic
-        if (!inPunishWindow) return;         // mid-swing — input has no effect (no buffering, for now)
-
-        AttackMoveData next = currentMove.NextOnLight;
-        if (next != null) StartMove(next);
-        else EndCombo();
+        Debug.Log($"[OnLightPressed] Frame {Time.frameCount}: ACCEPTED, isChargingLight=true (currentMove='{currentMove?.name}')");
+        isChargingLight = true;
+        lightHoldTimer = 0f;
     }
 
     private void OnLightReleased()
     {
-        if (!isChargingLight) return; // released after Rush already triggered, or wasn't charging at all — nothing to do
-
+        if (!isChargingLight)
+        {
+            Debug.Log($"[OnLightReleased] Frame {Time.frameCount}: ignored, isChargingLight was already false");
+            return;
+        }
         isChargingLight = false;
-        StartMove(lightEntryMove); // released before the hold threshold — a genuine tap
+
+        if (currentMove == null)
+        {
+            // Fresh entry — held past the rush threshold while outside combat range = Rush,
+            // otherwise the normal entry move.
+            bool rushEligible = rushAttackMove != null && playerController != null &&
+                lightHoldTimer >= rushHoldThreshold && !playerController.IsInCombatRange();
+            Debug.Log($"[OnLightReleased] Frame {Time.frameCount}: fresh entry, starting {(rushEligible ? "RUSH" : "normal")} move");
+            StartMove(rushEligible ? rushAttackMove : lightEntryMove);
+        }
+        else
+        {
+            if (currentMove.IsAdvanced || !inPunishWindow)
+            {
+                Debug.Log($"[OnLightReleased] Frame {Time.frameCount}: REJECTED at release ('{currentMove.name}' IsAdvanced={currentMove.IsAdvanced} inPunishWindow={inPunishWindow}, t-relevant activeMoveTimer={activeMoveTimer:F4})");
+                return;
+            }
+
+            AttackMoveData next = currentMove.NextOnLight;
+            Debug.Log($"[OnLightReleased] Frame {Time.frameCount}: chaining from '{currentMove.name}' to '{next?.name}'");
+            if (next != null) StartMove(next);
+            else EndCombo();
+        }
     }
 
     private void OnHeavyPressed()
     {
         if (currentMove == null)
         {
-            if (playerController != null && !playerController.CanAttack) return;
+            if (playerController != null && !playerController.CanAttack)
+            {
+                Debug.Log($"[OnHeavyPressed] Frame {Time.frameCount}: REJECTED (fresh entry, CanAttack=false)");
+                return;
+            }
             if (heavyEntryMove == null) return;
-            StartMove(heavyEntryMove);
-            return;
+        }
+        else
+        {
+            if (currentMove.IsAdvanced)
+            {
+                Debug.Log($"[OnHeavyPressed] Frame {Time.frameCount}: REJECTED ('{currentMove.name}' IsAdvanced)");
+                return;
+            }
+            if (!inPunishWindow)
+            {
+                Debug.Log($"[OnHeavyPressed] Frame {Time.frameCount}: REJECTED ('{currentMove.name}' inPunishWindow=false, activeMoveTimer={activeMoveTimer:F4})");
+                return;
+            }
         }
 
-        if (currentMove.IsAdvanced) return;
-        if (!inPunishWindow) return;
+        Debug.Log($"[OnHeavyPressed] Frame {Time.frameCount}: ACCEPTED, isChargingHeavy=true (currentMove='{currentMove?.name}')");
+        isChargingHeavy = true;
+    }
 
-        AttackMoveData next = advancedGateArmed ? currentMove.AdvancedUnlock : currentMove.NextOnHeavy;
-        if (next != null) StartMove(next);
-        else EndCombo();
+    private void OnHeavyReleased()
+    {
+        if (!isChargingHeavy)
+        {
+            Debug.Log($"[OnHeavyReleased] Frame {Time.frameCount}: ignored, isChargingHeavy was already false");
+            return;
+        }
+        isChargingHeavy = false;
+
+        if (currentMove == null)
+        {
+            Debug.Log($"[OnHeavyReleased] Frame {Time.frameCount}: fresh entry, starting heavyEntryMove");
+            if (heavyEntryMove != null) StartMove(heavyEntryMove);
+        }
+        else
+        {
+            if (currentMove.IsAdvanced || !inPunishWindow)
+            {
+                Debug.Log($"[OnHeavyReleased] Frame {Time.frameCount}: REJECTED at release ('{currentMove.name}' IsAdvanced={currentMove.IsAdvanced} inPunishWindow={inPunishWindow}, activeMoveTimer={activeMoveTimer:F4})");
+                return;
+            }
+
+            AttackMoveData next = advancedGateArmed ? currentMove.AdvancedUnlock : currentMove.NextOnHeavy;
+            Debug.Log($"[OnHeavyReleased] Frame {Time.frameCount}: chaining from '{currentMove.name}' to '{next?.name}'");
+            if (next != null) StartMove(next);
+            else EndCombo();
+        }
     }
 
     private void StartMove(AttackMoveData move)
@@ -164,20 +262,16 @@ public class ComboController : MonoBehaviour
         if (move == null) return;
 
         bool wasIdle = currentMove == null;
-        if (!wasIdle)
-        {
-            int pendingSteps = 0;
-            for (int i = 0; i < stepFired.Count; i++) if (!stepFired[i]) pendingSteps++;
-            Debug.Log($"[StartMove] Frame {Time.frameCount}: CHAINING from '{currentMove.name}' (had {pendingSteps} unfired steps left) to '{move.name}', activeMoveTimer={activeMoveTimer:F4}");
-        }
-        else
-        {
-            Debug.Log($"[StartMove] Frame {Time.frameCount}: starting '{move.name}' from idle");
-        }
+        if (!wasIdle) Debug.Log($"[StartMove] Frame {Time.frameCount}: '{currentMove.name}' -> '{move.name}' (was inPunishWindow={inPunishWindow}, activeMoveTimer was {activeMoveTimer:F4})");
+        else Debug.Log($"[StartMove] Frame {Time.frameCount}: starting '{move.name}' from idle");
         currentMove = move;
+        if (move.HitEvents.Count == 0)
+            Debug.LogWarning($"'{move.name}' has NO Hit Events configured — its punish window will open almost immediately, since there's nothing to wait for. Add at least one Hit Event in the Inspector.", move);
         inPunishWindow = false;
-        currentMoveHasHit = false;
         activeMoveTimer = 0f;
+
+        hitEventFired.Clear();
+        for (int i = 0; i < move.HitEvents.Count; i++) hitEventFired.Add(false);
 
         stepFired.Clear();
         for (int i = 0; i < move.ForwardSteps.Count; i++) stepFired.Add(false);
@@ -190,7 +284,9 @@ public class ComboController : MonoBehaviour
 
     private void Update()
     {
-        if (isChargingLight) TickLightCharge();
+        // Just accumulates now — the release handler decides what to do with the duration,
+        // rather than firing the instant a threshold is crossed while still held.
+        if (isChargingLight) lightHoldTimer += Time.deltaTime;
 
         if (animator != null)
         {
@@ -205,17 +301,6 @@ public class ComboController : MonoBehaviour
         TickActiveMove();
     }
 
-    private void TickLightCharge()
-    {
-        lightHoldTimer += Time.deltaTime;
-        if (lightHoldTimer < rushHoldThreshold) return;
-
-        isChargingLight = false;
-
-        bool rushEligible = rushAttackMove != null && playerController != null && !playerController.IsInCombatRange();
-        StartMove(rushEligible ? rushAttackMove : lightEntryMove);
-    }
-
     /// One continuous tick covering the whole lifetime of a move: hit detection during the
     /// active frames, opening the punish window the instant those active frames end (the
     /// window IS the remaining recovery animation, not a separate added wait), and finally
@@ -226,8 +311,25 @@ public class ComboController : MonoBehaviour
         activeMoveTimer += Time.deltaTime;
         if (animator == null) return;
 
-        AnimatorStateInfo info = animator.GetCurrentAnimatorStateInfo(0);
-        float t = info.normalizedTime % 1f; // safe to wrap — only used for the hit window check below
+        // While still mid-crossfade, GetCurrentAnimatorStateInfo reports the SOURCE state
+        // (the one being transitioned FROM), not the destination — GetNextAnimatorStateInfo
+        // is what reports the incoming state during a transition. For a fresh entry the
+        // source is Locomotion, harmless either way. For chaining, the source is the
+        // PREVIOUS attack clip — and since a chain only happens during that previous move's
+        // own punish window, its normalizedTime is already late (e.g. 0.7-0.9). Reading
+        // that stale value for even a frame after StartMove() means t starts already past
+        // LastHitEventWindowEnd, opening the punish window instantly — this is what was
+        // letting chained moves (never fresh-entry ones) be interrupted immediately.
+        // Derived from activeMoveTimer (code-controlled, reset to exactly 0 in StartMove,
+        // incremented by Time.deltaTime every frame) instead of the Animator's own
+        // normalizedTime — that was proving unreliable immediately after a chain, reporting
+        // values like 0.65 when activeMoveTimer said only 0.01s had actually elapsed. Only
+        // clip length is still read from the Animator, which is a fixed property, not
+        // something that changes during a transition.
+        AnimatorStateInfo info = animator.IsInTransition(0)
+            ? animator.GetNextAnimatorStateInfo(0)
+            : animator.GetCurrentAnimatorStateInfo(0);
+        float t = info.length > 0f ? Mathf.Clamp01(activeMoveTimer / info.length) : 0f;
 
         for (int i = 0; i < currentMove.ForwardSteps.Count; i++)
         {
@@ -237,23 +339,33 @@ public class ComboController : MonoBehaviour
             if (t < step.triggerTime) continue;
 
             stepFired[i] = true;
-            Debug.Log($"[ForwardStep] Frame {Time.frameCount}: step {i} FIRED at t={t:F4} (triggerTime={step.triggerTime:F4}), move={currentMove.name}");
             // No combat-range gate here anymore — Attack Range naturally reduces or skips
             // this step via ClampApproachToMinDistance, already wired into TickAttacking.
             playerController?.BeginAttackStep(step.distance, step.duration);
         }
 
-        if (!currentMoveHasHit && t >= currentMove.HitboxActiveStart && t <= currentMove.HitboxActiveEnd)
-            TryLandHit();
+        for (int i = 0; i < currentMove.HitEvents.Count; i++)
+        {
+            if (hitEventFired[i]) continue;
 
-        if (!inPunishWindow && t > currentMove.HitboxActiveEnd)
+            AttackMoveData.HitEvent hit = currentMove.HitEvents[i];
+            float halfWindow = hit.activeWindow / 2f;
+            if (t < hit.triggerTime - halfWindow || t > hit.triggerTime + halfWindow) continue;
+
+            hitEventFired[i] = true;
+            TryLandHit(hit);
+        }
+
+        if (!inPunishWindow && t > LastHitEventWindowEnd(currentMove))
         {
             // Hitbox frames are done, but the clip is still playing its recovery — this IS
             // the window now. A press here crossfades straight into the next move, cutting
             // off whatever recovery frames were left, which is what actually reads as
             // "flowing into the next hit" instead of a dead pause.
             inPunishWindow = true;
-            advancedGateArmed = currentMove.GatesAdvanced && currentMoveHasHit;
+            Debug.Log($"[PunishWindow] Frame {Time.frameCount}: OPENED for '{currentMove.name}' at t={t:F4} (LastHitEventWindowEnd={LastHitEventWindowEnd(currentMove):F4}), activeMoveTimer={activeMoveTimer:F4}");
+            bool anyHitConnected = hitEventFired.Contains(true);
+            advancedGateArmed = currentMove.GatesAdvanced && anyHitConnected;
         }
 
         // Completion is elapsed real time vs. the clip's actual length (in seconds) — not
@@ -275,32 +387,31 @@ public class ComboController : MonoBehaviour
         }
     }
 
-    private void TryLandHit()
+    private void TryLandHit(AttackMoveData.HitEvent hit)
     {
         if (targetDamageReceiver == null) return;
 
-        Vector3 hitboxCenter = transform.position + transform.forward * currentMove.HitboxForwardOffset + Vector3.up * currentMove.HitboxHeightOffset;
+        Vector3 hitboxCenter = transform.position + transform.forward * hit.hitboxForwardOffset + Vector3.up * hit.hitboxHeightOffset;
         float distSqr = (targetDamageReceiver.transform.position - hitboxCenter).sqrMagnitude;
-        float radius = currentMove.HitboxRadius;
+        float radius = hit.hitboxRadius;
 
         if (distSqr <= radius * radius)
         {
-            currentMoveHasHit = true;
-            ApplyHit();
+            ApplyHit(hit);
         }
     }
 
-    private void ApplyHit()
+    private void ApplyHit(AttackMoveData.HitEvent hit)
     {
         float damageMultiplier = reinforcement != null ? reinforcement.DamageMultiplier : 1f;
-        float finalDamage = currentMove.Damage * damageMultiplier;
+        float finalDamage = hit.damage * damageMultiplier;
 
         bool wasParried = false;
 
         if (targetPlayerController != null)
         {
             PlayerController.GuardReactionResult result = targetPlayerController.EvaluateGuardTiming(
-                currentMove.ReactionWindowDuration, currentMove.ParryThreshold, out float quality);
+                hit.reactionWindowDuration, hit.parryThreshold, out float quality);
 
             switch (result)
             {
@@ -328,7 +439,7 @@ public class ComboController : MonoBehaviour
 
         if (!wasParried && targetPlayerController != null)
         {
-            Vector3 knockbackDir = currentMove.Knockback switch
+            Vector3 knockbackDir = hit.knockback switch
             {
                 AttackMoveData.KnockbackType.Backward =>
                     (targetPlayerController.transform.position - transform.position).normalized,
@@ -336,7 +447,7 @@ public class ComboController : MonoBehaviour
                 _ => Vector3.zero
             };
 
-            targetPlayerController.ApplyHitReaction(currentMove.HitstunDuration, knockbackDir * currentMove.KnockbackForce);
+            targetPlayerController.ApplyHitReaction(hit.hitstunDuration, knockbackDir * hit.knockbackForce);
         }
     }
 
@@ -347,7 +458,6 @@ public class ComboController : MonoBehaviour
     {
         currentMove = null;
         inPunishWindow = false;
-        currentMoveHasHit = false;
         advancedGateArmed = false;
     }
 
@@ -355,7 +465,6 @@ public class ComboController : MonoBehaviour
     {
         currentMove = null;
         inPunishWindow = false;
-        currentMoveHasHit = false;
         advancedGateArmed = false;
 
         if (animator != null && !string.IsNullOrEmpty(locomotionStateName))
@@ -369,10 +478,16 @@ public class ComboController : MonoBehaviour
         if (currentMove == null || animator == null) return;
 
         float t = animator.GetCurrentAnimatorStateInfo(0).normalizedTime % 1f;
-        bool hitboxActive = t >= currentMove.HitboxActiveStart && t <= currentMove.HitboxActiveEnd;
 
-        Gizmos.color = hitboxActive ? Color.red : new Color(1f, 0f, 1f, 0.25f);
-        Vector3 hitboxCenter = transform.position + transform.forward * currentMove.HitboxForwardOffset + Vector3.up * currentMove.HitboxHeightOffset;
-        Gizmos.DrawWireSphere(hitboxCenter, currentMove.HitboxRadius);
+        for (int i = 0; i < currentMove.HitEvents.Count; i++)
+        {
+            AttackMoveData.HitEvent hit = currentMove.HitEvents[i];
+            float halfWindow = hit.activeWindow / 2f;
+            bool hitboxActive = t >= hit.triggerTime - halfWindow && t <= hit.triggerTime + halfWindow;
+
+            Gizmos.color = hitboxActive ? Color.red : Color.white;
+            Vector3 hitboxCenter = transform.position + transform.forward * hit.hitboxForwardOffset + Vector3.up * hit.hitboxHeightOffset;
+            Gizmos.DrawWireSphere(hitboxCenter, hit.hitboxRadius);
+        }
     }
 }

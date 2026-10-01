@@ -23,11 +23,12 @@ public class InputReader : ScriptableObject, Controls.IPlayerActions
     public event Action JumpEvent;          // fired the frame the button is pressed
     public event Action JumpCanceledEvent;  // fired when released (useful later for variable jump height)
     public event Action DashEvent;          // fired the frame the button is pressed
-    public event Action LockOnEvent;        // fired the frame the lock-on button is pressed
+    public event Action LockEvent;          // fired the frame the lock-on button is pressed
     public event Action ReinforceEvent;    // fired the frame the reinforce button is pressed
     public event Action LightAttackEvent;   // fired the frame the light attack button is pressed
     public event Action LightAttackCanceledEvent; // fired the frame the light attack button is released
     public event Action HeavyAttackEvent;   // fired the frame the heavy attack button is pressed
+    public event Action HeavyAttackCanceledEvent; // fired the frame the heavy attack button is released
     // ----- Stick values (continuous, polled by consumers) -----
     public Vector2 MoveInput { get; private set; }
     public Vector2 LookInput { get; private set; }
@@ -55,6 +56,12 @@ public class InputReader : ScriptableObject, Controls.IPlayerActions
 
     // ----- IPlayerActions callbacks -----
     // SetCallbacks routes every phase (started/performed/canceled) of each action here.
+    // These must be the ONLY implementations of Controls.IPlayerActions in this class —
+    // do not let an IDE "implement interface" action regenerate stub versions of these
+    // below as explicit interface implementations. If it ever does, C# will silently
+    // prefer those stubs for anything dispatched through the interface (exactly what
+    // SetCallbacks does), and every action below becomes dead code that never actually
+    // runs — with the stubs likely throwing NotImplementedException on every input.
 
     public void OnMove(InputAction.CallbackContext context)
     {
@@ -78,9 +85,9 @@ public class InputReader : ScriptableObject, Controls.IPlayerActions
         if (context.performed) DashEvent?.Invoke();
     }
 
-    public void OnLockOn(InputAction.CallbackContext context)
+    public void OnLock(InputAction.CallbackContext context)
     {
-        if (context.performed) LockOnEvent?.Invoke();
+        if (context.performed) LockEvent?.Invoke();
     }
 
     public void OnReinforce(InputAction.CallbackContext context)
@@ -97,6 +104,7 @@ public class InputReader : ScriptableObject, Controls.IPlayerActions
     public void OnHeavyAttack(InputAction.CallbackContext context)
     {
         if (context.performed) HeavyAttackEvent?.Invoke();
+        else if (context.canceled) HeavyAttackCanceledEvent?.Invoke();
     }
 
     public void OnGuard(InputAction.CallbackContext context)

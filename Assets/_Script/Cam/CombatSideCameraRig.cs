@@ -21,6 +21,8 @@ public class CombatSideCameraRig : MonoBehaviour
     [Header("Refs")]
     [SerializeField] private Transform player;
     [SerializeField] private Transform enemy;
+    [Tooltip("Needed so this rig's enemy reference stays in sync with lock-on target switches — without this, the camera keeps framing whatever it was originally pointed at even after the player locks onto or flicks to a different target.")]
+    [SerializeField] private PlayerController playerController;
     [SerializeField] private InputReader input;
     [Tooltip("The actual rendered camera — used to read FOV/aspect for the framing math. Defaults to Camera.main if left empty.")]
     [SerializeField] private Camera cam;
@@ -59,6 +61,22 @@ public class CombatSideCameraRig : MonoBehaviour
     [SerializeField] private float positionDamping = 8f;
     [SerializeField] private float rotationDamping = 10f;
 
+    [Header("Target Switch Transition")]
+    [Tooltip("If true, the camera instantly snaps to frame the new target the moment lock-on " +
+             "switches. If false, it transitions using the smoothed settings below instead.")]
+    [SerializeField] private bool instantSnapOnTargetSwitch = false;
+    [Tooltip("Position damping used ONLY during the transition right after a target switch — " +
+             "separate from the normal ongoing follow damping above, so switch feel can be " +
+             "tuned independently. Higher = faster/snappier.")]
+    [SerializeField] private float targetSwitchPositionDamping = 15f;
+    [Tooltip("Rotation damping used ONLY during the transition right after a target switch.")]
+    [SerializeField] private float targetSwitchRotationDamping = 12f;
+    [Tooltip("How long after a switch the above transition-specific damping values are used, " +
+             "before reverting to the normal ongoing follow damping.")]
+    [SerializeField] private float targetSwitchTransitionDuration = 0.3f;
+    private float targetSwitchTransitionTimer;
+    private bool snapPendingThisFrame;
+
     private int side = 1; // +1 or -1, which side of the axis the camera sits on
     private Vector3 currentVelocity;
     private Vector3 smoothedAxisDir = Vector3.forward;
@@ -70,12 +88,25 @@ public class CombatSideCameraRig : MonoBehaviour
 
     private void OnEnable()
     {
-        if (input != null) input.LockOnEvent += FlipSide;
+        if (input != null) input.LockEvent += FlipSide;
+        if (playerController != null)
+        {
+            playerController.TargetChanged += OnTargetChanged;
+            enemy = playerController.Target; // in case lock-on already has a target assigned before this rig ever gets a TargetChanged event
+        }
     }
 
     private void OnDisable()
     {
-        if (input != null) input.LockOnEvent -= FlipSide;
+        if (input != null) input.LockEvent -= FlipSide;
+        if (playerController != null) playerController.TargetChanged -= OnTargetChanged;
+    }
+
+    private void OnTargetChanged(Transform newTarget)
+    {
+        enemy = newTarget;
+        if (instantSnapOnTargetSwitch) snapPendingThisFrame = true;
+        else targetSwitchTransitionTimer = targetSwitchTransitionDuration;
     }
 
     public void FlipSide() => side *= -1;
@@ -117,7 +148,21 @@ public class CombatSideCameraRig : MonoBehaviour
         Vector3 lookPoint = Vector3.Lerp(player.position, enemy.position, lookBias) + Vector3.up * lookHeightOffset;
         Quaternion desiredRot = Quaternion.LookRotation((lookPoint - desiredPos).normalized, Vector3.up);
 
-        transform.position = Vector3.SmoothDamp(transform.position, desiredPos, ref currentVelocity, 1f / positionDamping);
-        transform.rotation = Quaternion.Slerp(transform.rotation, desiredRot, rotationDamping * Time.deltaTime);
+        if (snapPendingThisFrame)
+        {
+            transform.position = desiredPos;
+            transform.rotation = desiredRot;
+            snapPendingThisFrame = false;
+        }
+        else
+        {
+            bool inSwitchTransition = targetSwitchTransitionTimer > 0f;
+            float posDamping = inSwitchTransition ? targetSwitchPositionDamping : positionDamping;
+            float rotDamping = inSwitchTransition ? targetSwitchRotationDamping : rotationDamping;
+            if (inSwitchTransition) targetSwitchTransitionTimer -= Time.deltaTime;
+
+            transform.position = Vector3.SmoothDamp(transform.position, desiredPos, ref currentVelocity, 1f / posDamping);
+            transform.rotation = Quaternion.Slerp(transform.rotation, desiredRot, rotDamping * Time.deltaTime);
+        }
     }
 }

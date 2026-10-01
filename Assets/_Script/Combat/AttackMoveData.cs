@@ -28,6 +28,49 @@ public class AttackMoveData : ScriptableObject
         public float duration = 0.15f;
     }
 
+    /// One discrete, precisely-timed hit within a move — a single animation can have
+    /// several (e.g. a two-slash attack), each with its own hitbox, damage, knockback, and
+    /// reaction window. Unlike the old Start/End range, this checks a small tolerance
+    /// window AROUND a specific trigger point, not a wide plausible span — the hit is
+    /// meant to land at a precise, intentional moment, not whenever the target first
+    /// happens to be in range sometime during a longer window.
+    [System.Serializable]
+    public class HitEvent
+    {
+        [Header("Timing")]
+        [Tooltip("Precise normalized time (0-1) this hit checks for a connection.")]
+        [Range(0f, 1f)]
+        public float triggerTime = 0.2f;
+        [Tooltip("Small tolerance window (0-1) centered on triggerTime — exists only to " +
+                 "cover rare frame-rate timing misses, not to widen when this hit is " +
+                 "'allowed' to land. Keep this small.")]
+        [Range(0f, 0.1f)]
+        public float activeWindow = 0.02f;
+
+        [Header("Hitbox")]
+        [Tooltip("Forward offset from the attacker's position for this hit's hitbox center, in meters.")]
+        public float hitboxForwardOffset = 1.2f;
+        [Tooltip("Vertical offset from the attacker's position for this hit's hitbox center, in meters.")]
+        public float hitboxHeightOffset = 1f;
+        [Tooltip("Hitbox radius, in meters.")]
+        public float hitboxRadius = 0.8f;
+
+        [Header("Effect")]
+        [Tooltip("Base damage for THIS hit specifically, before Reinforcement's DamageMultiplier is applied.")]
+        public float damage = 10f;
+        [Tooltip("Seconds of hitstun THIS hit causes. 0 = no hitstun at all for this specific hit.")]
+        public float hitstunDuration = 0.3f;
+        public KnockbackType knockback = KnockbackType.None;
+        [Tooltip("Knockback strength, meters/second, for this hit. Unused if knockback is None.")]
+        public float knockbackForce = 4f;
+
+        [Header("Defender Reaction")]
+        [Tooltip("Seconds before THIS hit lands during which a fresh Guard press counts as a timed read at all.")]
+        public float reactionWindowDuration = 0.15f;
+        [Tooltip("Seconds before THIS hit lands within which a fresh Guard press counts as a full parry instead of a graded block. Must be <= reactionWindowDuration.")]
+        public float parryThreshold = 0.05f;
+    }
+
     [Header("Animation")]
     [Tooltip("Exact Animator state name this move plays. Played directly via CrossFade, " +
              "not through a per-move trigger parameter — keeps this scalable as the combo " +
@@ -36,19 +79,12 @@ public class AttackMoveData : ScriptableObject
     [Tooltip("Crossfade blend duration into this move's animation state.")]
     [SerializeField] private float blendInDuration = 0.05f;
 
-    [Header("Hitbox Timing")]
-    [Tooltip("Normalized time (0-1) within this clip where the hitbox becomes active.")]
-    [Range(0f, 1f)]
-    [SerializeField] private float hitboxActiveStart = 0.2f;
-    [Tooltip("Normalized time (0-1) within this clip where the hitbox stops being active.")]
-    [Range(0f, 1f)]
-    [SerializeField] private float hitboxActiveEnd = 0.35f;
-    [Tooltip("Forward offset from the attacker's position for the hitbox center, in meters.")]
-    [SerializeField] private float hitboxForwardOffset = 1.2f;
-    [Tooltip("Vertical offset from the attacker's position for the hitbox center, in meters.")]
-    [SerializeField] private float hitboxHeightOffset = 1f;
-    [Tooltip("Hitbox radius, in meters.")]
-    [SerializeField] private float hitboxRadius = 0.8f;
+    [Header("Hit Events")]
+    [Tooltip("Each entry is a separate, precisely-timed hit — add more than one for an " +
+             "animation with multiple distinct impact moments (e.g. a two-slash attack). " +
+             "Each fires at most once per move, checked against its own small tolerance " +
+             "window around its trigger time, not a wide plausible range.")]
+    [SerializeField] private List<HitEvent> hitEvents = new List<HitEvent>();
 
     [Header("Movement")]
     [Tooltip("Each entry is a separate forward step, firing at its own point in the clip — " +
@@ -58,34 +94,12 @@ public class AttackMoveData : ScriptableObject
              "re-aims fresh toward the target's current position when it triggers.")]
     [SerializeField] private List<ForwardStepEntry> forwardSteps = new List<ForwardStepEntry>();
 
-    [Header("Defender Reaction Window")]
-    [Tooltip("Seconds before this hit lands during which a FRESH Guard press counts as a " +
-             "timed read at all. Narrow this for Light attacks (hard to time), widen it for " +
-             "Heavy (easier to time) — this is the actual difficulty lever, independent of " +
-             "how fast the animations themselves look.")]
-    [SerializeField] private float reactionWindowDuration = 0.15f;
-    [Tooltip("Seconds before this hit lands within which a fresh Guard press counts as a " +
-             "full parry instead of a graded block. Must be <= reactionWindowDuration.")]
-    [SerializeField] private float parryThreshold = 0.05f;
-
-    [Header("Effect On Hit")]
-    [Tooltip("Base damage, before Reinforcement's DamageMultiplier is applied.")]
-    [SerializeField] private float damage = 10f;
-    [Tooltip("Seconds of hitstun this move causes on a successful hit. 0 = no hitstun at " +
-             "all — some moves are deliberately left without it, to create real gaps in a " +
-             "string that a slow follow-up can be sidestepped/guarded/parried inside of.")]
-    [SerializeField] private float hitstunDuration = 0.3f;
-    [SerializeField] private KnockbackType knockback = KnockbackType.None;
-    [Tooltip("Knockback strength, meters/second at the moment of the hit. Unused if " +
-             "knockback is None.")]
-    [SerializeField] private float knockbackForce = 4f;
-
     [Header("Combo Chaining")]
-    [Tooltip("The punish window is implicit — whatever's left of this clip after " +
-             "Hitbox Active End, not a separately authored value. Pressing Light/Heavy " +
-             "during that time continues the combo; letting the clip finish naturally " +
-             "returns to normal movement (Dash/move freely — Jump stays gated by the " +
-             "usual combat-range rule).")]
+    [Tooltip("The punish window opens once the LAST hit event's tolerance window has " +
+             "passed — not a separately authored value. Pressing Light/Heavy during that " +
+             "time continues the combo; letting the clip finish naturally returns to " +
+             "normal movement (Dash/move freely — Jump stays gated by the usual " +
+             "combat-range rule).")]
     [SerializeField] private AttackMoveData nextOnLight;
     [Tooltip("Next move if Heavy is pressed during the punish window. Null = string ends here on Heavy.")]
     [SerializeField] private AttackMoveData nextOnHeavy;
@@ -101,18 +115,8 @@ public class AttackMoveData : ScriptableObject
 
     public string AnimatorStateName => animatorStateName;
     public float BlendInDuration => blendInDuration;
+    public IReadOnlyList<HitEvent> HitEvents => hitEvents;
     public IReadOnlyList<ForwardStepEntry> ForwardSteps => forwardSteps;
-    public float ReactionWindowDuration => reactionWindowDuration;
-    public float ParryThreshold => parryThreshold;
-    public float HitboxActiveStart => hitboxActiveStart;
-    public float HitboxActiveEnd => hitboxActiveEnd;
-    public float HitboxForwardOffset => hitboxForwardOffset;
-    public float HitboxHeightOffset => hitboxHeightOffset;
-    public float HitboxRadius => hitboxRadius;
-    public float Damage => damage;
-    public float HitstunDuration => hitstunDuration;
-    public KnockbackType Knockback => knockback;
-    public float KnockbackForce => knockbackForce;
     public AttackMoveData NextOnLight => nextOnLight;
     public AttackMoveData NextOnHeavy => nextOnHeavy;
     public AttackMoveData AdvancedUnlock => advancedUnlock;

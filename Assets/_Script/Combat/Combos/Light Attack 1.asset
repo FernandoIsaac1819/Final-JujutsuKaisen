@@ -14,21 +14,22 @@ MonoBehaviour:
   m_EditorClassIdentifier: Assembly-CSharp::AttackMoveData
   animatorStateName: Light 1
   blendInDuration: 0.05
-  hitboxActiveStart: 0.23493569
-  hitboxActiveEnd: 0.28232908
-  hitboxForwardOffset: 0.9
-  hitboxHeightOffset: 1.5
-  hitboxRadius: 0.8
+  hitEvents:
+  - triggerTime: 0.25
+    activeWindow: 0.05
+    hitboxForwardOffset: 1.2
+    hitboxHeightOffset: 1.5
+    hitboxRadius: 0.3
+    damage: 2
+    hitstunDuration: 0
+    knockback: 0
+    knockbackForce: 0
+    reactionWindowDuration: 0
+    parryThreshold: 0
   forwardSteps:
   - triggerTime: 0
     distance: 4
     duration: 0.15
-  reactionWindowDuration: 1000
-  parryThreshold: 0.05
-  damage: 2
-  hitstunDuration: 0.3
-  knockback: 0
-  knockbackForce: 4
   nextOnLight: {fileID: 11400000, guid: fd27d8aabf65e7f4aa228e758d332e18, type: 2}
   nextOnHeavy: {fileID: 11400000, guid: 144ed62d3d221b94abbc02e95cba32a3, type: 2}
   advancedUnlock: {fileID: 0}

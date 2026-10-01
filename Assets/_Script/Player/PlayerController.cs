@@ -1,3 +1,4 @@
+using System;
 using UnityEngine;
 
 /// <summary>
@@ -31,6 +32,108 @@ public class PlayerController : MonoBehaviour
     public bool CanAttack => action == ActionState.Locomotion ||
         (action == ActionState.Dashing && DashProgress01 >= dashAttackCancelWindow);
 
+    // ---------------- Lock-On ----------------
+    private bool isLockedOn;
+    public bool IsLockedOn => isLockedOn;
+    public Transform Target => target;
+
+    /// Fired whenever target is reassigned while locked on (initial lock, or a flick
+    /// switch) — anything with its own independent reference to the enemy (the camera,
+    /// notably) needs to subscribe to this rather than assuming target never changes.
+    public event Action<Transform> TargetChanged;
+
+    private TargetGroup activeGroup; // the group currently providing targets — found once when lock-on first engages
+    private float prevLookX;
+    private float targetSwitchCooldownTimer;
+
+    private void OnLockOnPressed()
+    {
+        isLockedOn = !isLockedOn;
+
+        if (isLockedOn)
+        {
+            if (activeGroup == null) activeGroup = FindNearestTargetGroup();
+            if (activeGroup != null)
+            {
+                SetTarget(activeGroup.Primary); // ALWAYS the primary on (re)engage, never nearest
+            }
+        }
+
+        Debug.Log($"[LockOn] Toggled {(isLockedOn ? "ON" : "OFF")}, target='{target?.name}'");
+    }
+
+    /// The game is strict 1v1, so there should only ever be one TargetGroup active at a
+    /// time in practice — this search is just future-proofing, not meant to handle several
+    /// simultaneous fights.
+    private TargetGroup FindNearestTargetGroup()
+    {
+        TargetGroup[] groups = FindObjectsByType<TargetGroup>(FindObjectsSortMode.None);
+        TargetGroup nearest = null;
+        float nearestDistSqr = float.MaxValue;
+
+        foreach (TargetGroup group in groups)
+        {
+            float distSqr = (group.Primary.position - transform.position).sqrMagnitude;
+            if (distSqr < nearestDistSqr)
+            {
+                nearestDistSqr = distSqr;
+                nearest = group;
+            }
+        }
+
+        return nearest;
+    }
+
+    /// Reassigns target and does everything that MUST happen alongside that: resyncing
+    /// orbit state (otherwise the next orbital correction snaps toward the new target using
+    /// direction/radius data that belonged to the old one — this is what was causing the
+    /// teleport bug) and notifying anything with its own independent reference to the enemy.
+    private void SetTarget(Transform newTarget)
+    {
+        target = newTarget;
+        SyncOrbitState();
+        TargetChanged?.Invoke(target);
+    }
+
+    /// Detects a flick as an EDGE — the stick crossing the threshold this frame when it
+    /// wasn't past it last frame — rather than firing continuously while held past it.
+    /// Threshold/cooldown come from the active group, not a fixed value here, since
+    /// different enemies may reasonably want different flick feel.
+    private void TickTargetSwitch()
+    {
+        if (activeGroup == null)
+        {
+            Debug.Log($"[LockOn] TickTargetSwitch: activeGroup is NULL — flick switching cannot work until a TargetGroup is found. Frame {Time.frameCount}");
+            return;
+        }
+        if (targetSwitchCooldownTimer > 0f) targetSwitchCooldownTimer -= Time.deltaTime;
+
+        float lookX = input.LookInput.x;
+        bool wasBelow = Mathf.Abs(prevLookX) < activeGroup.FlickThreshold;
+        bool isAbove = Mathf.Abs(lookX) >= activeGroup.FlickThreshold;
+
+        if (Mathf.Abs(lookX) > 0.05f) // only log when the stick is actually being moved, to avoid spam at rest
+            Debug.Log($"[LockOn] lookX={lookX:F3}, threshold={activeGroup.FlickThreshold:F2}, wasBelow={wasBelow}, isAbove={isAbove}, cooldown={targetSwitchCooldownTimer:F2}");
+
+        if (wasBelow && isAbove && targetSwitchCooldownTimer <= 0f)
+        {
+            int direction = lookX > 0f ? 1 : -1;
+            Transform next = activeGroup.GetTargetInDirection(transform.position, transform.right, target, direction);
+            if (next != null)
+            {
+                SetTarget(next);
+                Debug.Log($"[LockOn] Switched target to '{target.name}' (flick {(direction > 0 ? "right" : "left")})");
+            }
+            else
+            {
+                Debug.Log($"[LockOn] Flick detected ({(direction > 0 ? "right" : "left")}) but GetTargetInDirection found nothing — check TargetGroup's Secondaries list is populated");
+            }
+            targetSwitchCooldownTimer = activeGroup.FlickCooldown;
+        }
+
+        prevLookX = lookX;
+    }
+
     /// 0 at the instant a dash launches, 1 once it's fully decelerated — based on how far
     /// the current speed has decayed from its launch value, not on animation clip time,
     /// since the dash's actual duration varies with Reinforcement's speed multiplier.
@@ -42,6 +145,11 @@ public class PlayerController : MonoBehaviour
             {
                 if (dashLaunchAngularSpeed <= 0.0001f) return 1f;
                 return 1f - Mathf.Clamp01(Mathf.Abs(dashOrbitAngularSpeed) / dashLaunchAngularSpeed);
+            }
+            if (dashIsFixedDistance)
+            {
+                if (inRangeDashDistance <= 0.0001f) return 1f;
+                return 1f - Mathf.Clamp01(dashFixedRemaining / inRangeDashDistance);
             }
             if (dashLaunchSpeed <= 0.0001f) return 1f;
             return 1f - Mathf.Clamp01(velocity.magnitude / dashLaunchSpeed);
@@ -86,12 +194,11 @@ public class PlayerController : MonoBehaviour
     private float sprintHoldTimer;
 
     [Header("Movement-Direction Facing (Locomotion/RCT)")]
-    [Tooltip("Degrees from straight forward/backward within which movement uses the " +
-             "Forward/Backward animation (rotated to face the actual movement direction) " +
-             "instead of the dedicated strafe-left/right animation. Must leave room for a " +
-             "strafe zone — e.g. 60 leaves 60°-wide strafe zones on each side.")]
-    [Range(10f, 89f)]
-    [SerializeField] private float forwardBackThreshold = 60f;
+    [Tooltip("Degrees from straight forward within which input counts as Forward (Backward " +
+             "covers the rest). 90 splits the circle evenly in half — there's no separate " +
+             "Strafe zone anymore, so no need to leave room for one.")]
+    
+    [SerializeField] private float forwardBackThreshold;
     [Tooltip("Extra angular buffer before switching category again once already in one — " +
              "prevents rapid flip-flopping between animations when input hovers near the boundary.")]
     [SerializeField] private float categoryHysteresis = 5f;
@@ -104,8 +211,8 @@ public class PlayerController : MonoBehaviour
              "fast the character can actually rotate.")]
     [SerializeField] private float rotationDirSmoothTime = 0.08f;
     [Tooltip("How long the DirX/DirZ blend tree input takes to glide between category points " +
-             "(Forward/Backward/StrafeLeft/StrafeRight/Idle) when the category changes. This " +
-             "is the actual smoothness dial — shorter feels snappier, longer feels floatier.")]
+             "(Forward/Backward/Idle) when the category changes. This is the actual " +
+             "smoothness dial — shorter feels snappier, longer feels floatier.")]
     [SerializeField] private float locomotionBlendSmoothTime = 0.12f;
 
     [Tooltip("How quickly currentSpeed eases between walk and run (or from idle into either) — separate from moveAccelTime, which still governs Guard's speed easing.")]
@@ -156,6 +263,14 @@ public class PlayerController : MonoBehaviour
              "straight dash, guaranteed — but the sweep's speed is fixed by that math " +
              "instead of coming from dashSpeed's natural feel.")]
     [SerializeField] private bool dashAngleSolveFromDuration = false;
+    [Tooltip("Fixed distance an in-range forward/back dash travels — deliberately separate " +
+             "from dashSpeed/dashDeceleration (the outside-range physics dash), since a " +
+             "short, predictable distance is what makes sense at close quarters. A forward " +
+             "dash still can't overshoot Attack Range, same as everything else that " +
+             "approaches the target.")]
+    [SerializeField] private float inRangeDashDistance = 2f;
+    [Tooltip("Constant speed for the in-range forward/back dash — not deceleration-based, so this is a real m/s value, not a launch speed.")]
+    [SerializeField] private float inRangeDashSpeed = 8f;
     [Tooltip("The ideal distance from the target for performing attacks — also a hard floor " +
              "for ALL movement (walking, dashing, jumping, attack forward steps), enforced " +
              "every frame, so nothing can ever cross through it. Attack forward steps work " +
@@ -194,6 +309,8 @@ public class PlayerController : MonoBehaviour
     private float dashCooldownTimer;
     private float dashLaunchMultiplier = 1f;
     private bool dashIsOrbital;
+    private bool dashIsFixedDistance; // in-range forward/back — fixed distance/speed, not deceleration-based
+    private float dashFixedRemaining;
     private float dashLaunchSpeed; // captured at launch — straight dash's initial speed magnitude, for progress tracking
     private float dashLaunchAngularSpeed; // captured at launch — orbital dash's initial angular speed magnitude
     private float dashOrbitAngularSpeed;
@@ -267,10 +384,16 @@ public class PlayerController : MonoBehaviour
         input.DashEvent += OnDashPressed;
         input.GuardEvent += OnGuardPressed;
         input.GuardCanceledEvent += OnGuardReleased;
+        input.LockEvent += OnLockOnPressed;
         if (rct != null) rct.ActiveChanged += OnRCTActiveChanged;
         if (combo != null) combo.ActiveChanged += OnComboActiveChanged;
         if (reinforcement != null) reinforcement.TierChanged += OnReinforcementTierChanged;
         animator.SetFloat(AttackSpeedMultiplierHash, normalAnimSpeed); // initial value, in case Reinforcement never fires an early event
+
+        // Lock on to the primary immediately at startup, rather than requiring a manual
+        // press first. Reuses the exact same engage logic a real press would run — isLockedOn
+        // starts false, so this one call toggles it on and finds/locks the primary.
+        OnLockOnPressed();
     }
 
     private void OnDisable()
@@ -279,6 +402,7 @@ public class PlayerController : MonoBehaviour
         input.DashEvent -= OnDashPressed;
         input.GuardEvent -= OnGuardPressed;
         input.GuardCanceledEvent -= OnGuardReleased;
+        input.LockEvent -= OnLockOnPressed;
         if (rct != null) rct.ActiveChanged -= OnRCTActiveChanged;
         if (combo != null) combo.ActiveChanged -= OnComboActiveChanged;
         if (reinforcement != null) reinforcement.TierChanged -= OnReinforcementTierChanged;
@@ -308,6 +432,8 @@ public class PlayerController : MonoBehaviour
         if (dashBufferTimer > 0f) dashBufferTimer -= Time.deltaTime;
 
         airborneTimer = controller.isGrounded ? 0f : airborneTimer + Time.deltaTime;
+
+        if (isLockedOn) TickTargetSwitch();
 
         // A buffered dash fires the instant cooldown clears, same idea as jump buffering on landing.
         if (dashBufferTimer > 0f && dashCooldownTimer <= 0f && action == ActionState.Locomotion && dashLockoutTimer <= 0f)
@@ -393,35 +519,75 @@ public class PlayerController : MonoBehaviour
         return desiredDisplacement;
     }
 
+    // ---------------- Gizmos ----------------
+
+    [Header("Debug")]
+    [Tooltip("Shows lock-on state and current target as an on-screen overlay during Play Mode.")]
+    [SerializeField] private bool showLockOnDebugOverlay = true;
+
+    private void OnGUI()
+    {
+        if (!showLockOnDebugOverlay) return;
+
+        GUIStyle style = new GUIStyle { fontSize = 20, normal = { textColor = isLockedOn ? Color.yellow : Color.white } };
+        string text = $"Lock-On: {(isLockedOn ? "ON" : "OFF")}\nTarget: {(target != null ? target.name : "none")}";
+        GUI.Label(new Rect(10, 10, 400, 60), text, style);
+    }
+
+    private void OnDrawGizmos()
+    {
+        if (target == null) return;
+
+        Gizmos.color = Color.cyan;
+        DrawGizmoCircle(target.position, combatRange, 48);
+
+        Gizmos.color = Color.red;
+        DrawGizmoCircle(target.position, attackRange, 32);
+
+        if (isLockedOn)
+        {
+            Gizmos.color = Color.yellow;
+            Gizmos.DrawWireSphere(target.position + Vector3.up * 1.8f, 0.3f);
+        }
+    }
+
+    private void DrawGizmoCircle(Vector3 center, float radius, int segments)
+    {
+        if (radius <= 0f) return;
+
+        Vector3 prevPoint = center + new Vector3(radius, 0f, 0f);
+        for (int i = 1; i <= segments; i++)
+        {
+            float angle = (i / (float)segments) * 360f * Mathf.Deg2Rad;
+            Vector3 nextPoint = center + new Vector3(Mathf.Cos(angle) * radius, 0f, Mathf.Sin(angle) * radius);
+            Gizmos.DrawLine(prevPoint, nextPoint);
+            prevPoint = nextPoint;
+        }
+    }
     // ---------------- Locomotion ----------------
 
     private void TickLocomotion()
     {
         Vector2 mv = input.MoveInput;
-        bool hasInput = GetLocomotionMovement(mv, out Vector3 continuousDir, out Vector3 rightAxis, out float rawAngleDeg, out float speedBlend01, out float targetSpeed);
+        bool hasInput = GetLocomotionMovement(mv, out Vector3 continuousDir, out float rawAngleDeg, out float speedBlend01, out float targetSpeed);
 
         UpdateLocomotionAnimCategory(hasInput, rawAngleDeg, mv.magnitude); // determine category before deciding rotate direction
 
         if (hasInput)
         {
             currentSpeed = Mathf.SmoothDamp(currentSpeed, targetSpeed, ref speedVelocityRef, walkRunTransitionTime);
+            velocity = continuousDir * currentSpeed; // always the current instantaneous tangent — never smoothed/lagged, which is what keeps orbiting a true circle
 
-            // Strafe moves exactly sideways, matching its dedicated clip; Forward/Backward
-            // keep the full continuous direction. Blended only briefly across a category
-            // change (see GetSmoothedMoveDir) — smooths the transition jerk without
-            // reintroducing the earlier drift.
-            Vector3 moveDir = GetSmoothedMoveDir(continuousDir, rightAxis);
-            velocity = moveDir * currentSpeed;
-
-            // Forward faces the travel direction directly. Backward faces the OPPOSITE of
-            // it — pure straight-back travel is 180° from normal forward, so its opposite
-            // is 0°, meaning no rotation at all (stays facing the target, matching a true
-            // backpedal). A backward-diagonal's opposite is offset by exactly the diagonal
-            // amount from that same baseline, which is the "twist by the diagonal angle"
-            // effect. Strafe keeps its own dedicated clip and just faces the target.
+            // Forward faces the travel direction directly — this now covers the full
+            // left/right range too, since there's no separate Strafe pose anymore; a pure
+            // sideways input just rotates a full 90° to face it, same mechanism a
+            // forward-diagonal already used. Backward faces the OPPOSITE of travel — pure
+            // straight-back is 180° from normal forward, so its opposite is 0°, meaning no
+            // rotation at all (stays facing the target, a true backpedal); a
+            // backward-diagonal's opposite is offset by exactly the diagonal amount from
+            // that baseline, which is the "twist by the diagonal angle" effect.
             if (currentAnimCategory == LocomotionAnimCategory.Forward) RotateTowardsMovementDirection(continuousDir);
-            else if (currentAnimCategory == LocomotionAnimCategory.Backward) RotateTowardsMovementDirection(-continuousDir);
-            else FaceTargetSmoothed();
+            else RotateTowardsMovementDirection(-continuousDir); // Backward
         }
         else
         {
@@ -430,7 +596,7 @@ public class PlayerController : MonoBehaviour
             currentSpeed = 0f;
             speedVelocityRef = 0f;
             velocity = Vector3.zero;
-            FaceTargetSmoothed(); // idle — resume facing the target, smoothed to match Strafe (avoids a snap when flipping between them)
+            FaceTargetSmoothed(); // idle — resume facing the target, smoothed to avoid a snap
         }
 
         Move(velocity);
@@ -448,42 +614,15 @@ public class PlayerController : MonoBehaviour
     }
 
     /// Same direction as FaceTarget, but smoothed at movementFacingTurnSpeed instead of
-    /// snapping instantly — used specifically for Strafe, where the angle-to-target changes
-    /// quickly during orbiting (especially at close range) and instant rotation reading
-    /// that every frame is what was making it feel snappy. FaceTarget itself stays instant
-    /// everywhere else (Guard, Dash, Attacking, Idle) — this doesn't touch those.
+    /// snapping instantly — used for Locomotion/RCT's Idle case, so releasing input doesn't
+    /// produce an instant rotation snap. FaceTarget itself stays instant everywhere else
+    /// (Guard, Dash, Attacking) — this doesn't touch those.
     private void FaceTargetSmoothed()
     {
         if (target == null) return;
         Vector3 dir = target.position - transform.position;
         dir.y = 0f;
         if (dir.sqrMagnitude > 0.0001f) RotateTowardsMovementDirection(dir.normalized);
-    }
-
-    /// Buckets raw stick input into one of 8 directions relative to current facing.
-    /// Returns world-space direction; snappedX/snappedZ are -1/0/1 for driving discrete animator params.
-    private Vector3 SnapToEightDirections(Vector2 mv, out int snappedX, out int snappedZ)
-        => SnapToEightDirections(mv, transform.forward, transform.right, out snappedX, out snappedZ);
-
-    /// Same as above, but takes an explicit forward/right instead of always reading
-    /// transform.forward/right. TickLocomotion uses this with orbitDirection's own basis
-    /// so movement input and the orbital math share one reference frame — otherwise a
-    /// "pure left" press interpreted via transform.rotation (which can drift slightly out
-    /// of sync with orbitDirection) leaks a small radial component every frame, which is
-    /// what was causing the steady one-directional drift.
-    private Vector3 SnapToEightDirections(Vector2 mv, Vector3 fwd, Vector3 right, out int snappedX, out int snappedZ)
-    {
-        snappedX = 0; snappedZ = 0;
-        if (mv.sqrMagnitude < 0.0001f) return Vector3.zero;
-
-        float angle = Mathf.Atan2(mv.x, mv.y) * Mathf.Rad2Deg;
-        float snappedAngle = Mathf.Round(angle / 45f) * 45f;
-
-        Vector3 dir = Quaternion.AngleAxis(snappedAngle, Vector3.up) * fwd;
-
-        snappedZ = Mathf.RoundToInt(Vector3.Dot(dir, fwd));   // -1 back, 0 pure strafe, 1 forward
-        snappedX = Mathf.RoundToInt(Vector3.Dot(dir, right)); // -1 left, 0 none, 1 right
-        return dir;
     }
 
     /// Buckets raw stick input into one of 4 cardinal directions (no diagonals) relative
@@ -506,9 +645,9 @@ public class PlayerController : MonoBehaviour
         return dir;
     }
 
-    /// Same orbit-aware basis as GetOrbitAwareDirection, for Dash's 4-directional snap
-    /// specifically — keeps Dash consistent with the same verified-correct reference frame
-    /// Locomotion/Guard/RCT already use, instead of a separately-guessed convention.
+    /// Same orbit-aware basis Locomotion/RCT use for their own movement resolution — keeps
+    /// Dash's 4-directional snap consistent with the same verified-correct reference frame
+    /// instead of a separately-guessed convention.
     private Vector3 GetOrbitAwareFourDirection(Vector2 mv, out int snappedX, out int snappedZ)
     {
         if (target != null && orbitInitialized)
@@ -521,409 +660,12 @@ public class PlayerController : MonoBehaviour
         return SnapToFourDirections(mv, out snappedX, out snappedZ);
     }
 
-    // ---------------- Jump ----------------
-
-    private void RecalculateJumpPhysics()
-    {
-        float effectiveHeight = jumpHeight * JumpMultiplier;
-        gravityUp = -(2f * effectiveHeight) / (timeToApex * timeToApex);
-        gravityDown = -(2f * effectiveHeight) / (timeToFall * timeToFall);
-        jumpVelocity = -gravityUp * timeToApex;
-    }
-
-    private void OnJumpPressed()
-    {
-        bool fromLocomotion = action == ActionState.Locomotion && jumpLockoutTimer <= 0f;
-        bool fromDashInterrupt = action == ActionState.Dashing || action == ActionState.DashWindup;
-        bool fromRCTInterrupt = action == ActionState.UsingRCT;
-        bool grounded = airborneTimer <= coyoteTime; // coyote time — still counts as grounded briefly after leaving a ledge
-
-        if ((fromLocomotion || fromDashInterrupt || fromRCTInterrupt) && grounded && jumpCooldownTimer <= 0f && !IsInCombatRange())
-        {
-            if (fromRCTInterrupt) rct?.ForceDeactivate();
-            DoJump();
-            return;
-        }
-
-        // Airborne and couldn't jump — remember the press, fires automatically the instant we land.
-        if (action == ActionState.Jumping)
-            jumpBufferTimer = jumpBufferWindow;
-    }
-
-    private void DoJump()
-    {
-        RecalculateJumpPhysics(); // pick up any runtime inspector tweaks before this jump
-        verticalVelocity = jumpVelocity;
-
-        Vector3 dir = GetOrbitAwareFourDirection(input.MoveInput, out int snappedX, out int snappedZ);
-        velocity = dir.normalized * airHorizontalSpeed * AirSpeedMultiplier;
-        animator.SetFloat(DirXHash, snappedX);
-        animator.SetFloat(DirZHash, snappedZ);
-
-        animator.SetBool(DashHash, false);
-        dashIsOrbital = false; // defensive — jump interrupting an orbital dash shouldn't be reachable, but cheap to guard against
-        action = ActionState.Jumping;
-        animator.SetTrigger(JumpHash);
-    }
-
-    private void TickJump()
-    {
-        FaceTarget(); // same reasoning as Dash — capped turn speed prevents mismatch, so no need to freeze this
-
-        if (airControl > 0f)
-        {
-            Vector3 dir = GetOrbitAwareFourDirection(input.MoveInput, out _, out _);
-            Vector3 targetAirVelocity = dir.normalized * airHorizontalSpeed * AirSpeedMultiplier;
-            velocity = Vector3.MoveTowards(velocity, targetAirVelocity, airControl * Time.deltaTime);
-        }
-
-        verticalVelocity += (verticalVelocity > 0f ? gravityUp : gravityDown) * Time.deltaTime;
-        Vector3 move = velocity + Vector3.up * verticalVelocity;
-        controller.Move(move * Time.deltaTime);
-
-        animator.SetFloat(VerticalVelocityHash, verticalVelocity);
-
-        if (controller.isGrounded && verticalVelocity <= 0f)
-        {
-            verticalVelocity = 0f;
-            jumpCooldownTimer = jumpCooldown;
-
-            if (jumpBufferTimer > 0f)
-            {
-                jumpBufferTimer = 0f;
-                DoJump(); // buffered press — skip Landing entirely, jump immediately
-                return;
-            }
-
-            action = ActionState.Landing;
-            landingTimer = landingRecoveryDuration;
-        }
-    }
-
-    private void EnterLocomotion()
-    {
-        action = ActionState.Locomotion;
-        if (!string.IsNullOrEmpty(locomotionStateName))
-            animator.CrossFadeInFixedTime(locomotionStateName, locomotionCrossfadeDuration);
-        // Synchronous, not deferred — a prior attempt to defer this to the end of Update()
-        // caused a worse bug: action flips to Locomotion immediately (synchronous event),
-        // so THIS frame's switch statement already routes to TickLocomotion before a
-        // deferred sync ever got a chance to run, leaving it to use stale orbit data for
-        // one frame and produce a visible snap. Syncing here immediately avoids that. The
-        // original concern (reading position mid-forward-step) isn't a real risk in
-        // practice — the step always finishes many frames before the clip does.
-        SyncOrbitState();
-
-        // Resync to whatever DirX/DirZ actually are right now — Dash (and Jump) set them
-        // directly and instantly, completely bypassing this tracking variable, which
-        // otherwise stays frozen at whatever it was before the interrupting state began.
-        // Starting the smoothing from that stale value instead of the true current pose is
-        // what caused the pop: small/invisible if the stale value happened to be close to
-        // the dash direction, large and visible if they'd diverged (e.g. was idle, then
-        // dashed a totally different direction).
-        locomotionBlendInput = new Vector2(animator.GetFloat(DirXHash), animator.GetFloat(DirZHash));
-
-        // Same fix, same reason, for rotation: smoothedRotationDir is frozen during Dash
-        // (nothing calls RotateTowardsMovementDirection/FaceTargetSmoothed while dashing),
-        // so it's still holding whatever direction it was tracking before the dash even
-        // started. Resync it to the character's actual current facing so the post-dash
-        // blend starts from reality instead of a stale pre-dash value.
-        smoothedRotationDir = transform.forward;
-        smoothedRotationDirVelocity = Vector3.zero;
-
-        bool hasInput = GetLocomotionMovement(input.MoveInput, out _, out _, out float rawAngleDeg, out float speedBlend01, out _);
-        UpdateLocomotionAnimCategory(hasInput, rawAngleDeg, input.MoveInput.magnitude);
-        animator.SetFloat(LocomotionSpeedHash, speedBlend01, dirBlendTime, Time.deltaTime);
-    }
-
-    private void TickLanding()
-    {
-        // Movement input cuts the recovery short instantly — no animation event needed.
-        if (input.MoveInput.sqrMagnitude > 0.01f)
-        {
-            EnterLocomotion();
-            dashLockoutTimer = dashLockoutAfterLanding;
-            return;
-        }
-
-        landingTimer -= Time.deltaTime;
-        if (landingTimer <= 0f)
-        {
-            EnterLocomotion();
-            dashLockoutTimer = dashLockoutAfterLanding;
-        }
-    }
-
-    // ---------------- Dash ----------------
-
-    private void OnDashPressed()
-    {
-        bool fromLocomotion = action == ActionState.Locomotion && dashLockoutTimer <= 0f;
-        bool fromLandingInterrupt = action == ActionState.Landing;
-        bool fromRCTInterrupt = action == ActionState.UsingRCT;
-        bool fromAttackInterrupt = action == ActionState.Attacking && combo != null && combo.InPunishWindow;
-        bool stateOk = fromLocomotion || fromLandingInterrupt || fromRCTInterrupt || fromAttackInterrupt;
-
-        if (stateOk && dashCooldownTimer <= 0f)
-        {
-            if (fromRCTInterrupt) rct?.ForceDeactivate();
-            if (fromAttackInterrupt)
-            {
-                combo?.ForceEndCombo();
-            }
-            EnterDashWindup();
-            return;
-        }
-
-        // Blocked only by cooldown (state itself was valid) — remember it, fires once cooldown clears.
-        if (stateOk)
-            dashBufferTimer = dashBufferWindow;
-    }
-
-    private void EnterDashWindup()
-    {
-        action = ActionState.DashWindup;
-        dashAimTimer = dashAimWindow;
-        velocity = Vector3.zero; // frozen during the aim window
-    }
-
-    private void TickDashWindup()
-    {
-        dashAimTimer -= Time.deltaTime;
-
-        if (input.MoveInput.sqrMagnitude > 0.0001f)
-        {
-            LaunchDash(input.MoveInput);
-        }
-        else if (dashAimTimer <= 0f)
-        {
-            // No direction given by the time the window expired — dash simply doesn't happen.
-            EnterLocomotion();
-        }
-    }
-
-    private void LaunchDash(Vector2 aimInput)
-    {
-        if (aimInput.sqrMagnitude <= 0.0001f) return; // shouldn't happen given TickDashWindup, but guard anyway
-
-        int snappedX, snappedZ;
-        Vector3 dashDir;
-        bool nearTarget = IsInCombatRange();
-
-        // Resync before anything reads orbitDirection — state may be stale from before a
-        // jump/landing that interrupted straight into this dash.
-        if (nearTarget && target != null) SyncOrbitState();
-
-        dashDir = GetOrbitAwareFourDirection(aimInput, out snappedX, out snappedZ);
-
-        // Within combat range, only lateral (Left/Right) dashes are allowed at all —
-        // forward/back simply don't trigger a dash, rather than falling back to a
-        // straight-line one.
-        if (nearTarget && snappedX == 0)
-        {
-            EnterLocomotion();
-            return;
-        }
-
-        animator.SetFloat(DirXHash, snappedX);
-        animator.SetFloat(DirZHash, snappedZ);
-
-        action = ActionState.Dashing;
-        dashLaunchMultiplier = DashSpeedMultiplier;
-
-        // Within combat range, a pure lateral dash becomes a true orbit sweep around the
-        // target — angle-tracked and decelerating angular speed, going through the same
-        // verified-correct orbitDirection rotation Locomotion uses. Forward/Back (and
-        // anything outside combat range) stay a straight-line dash, unchanged.
-        dashIsOrbital = nearTarget && snappedX != 0 && target != null;
-
-        if (dashIsOrbital)
-        {
-            // Sign determined by checking which way this direction actually rotates
-            // orbitDirection — reuses the same convention OrbitalDisplacement already uses
-            // and Locomotion already verified correct, instead of guessing independently.
-            Vector3 tangentDir = Vector3.Cross(Vector3.up, orbitDirection);
-            float sign = Mathf.Sign(Vector3.Dot(dashDir, tangentDir));
-            float radius = Mathf.Max(orbitRadius, 0.01f);
-
-            dashOrbitAngleRemaining = sideDodgeOrbitAngle * sign;
-
-            if (dashAngleSolveFromDuration)
-            {
-                // Solved so the sweep finishes in exactly the straight dash's own duration,
-                // at exactly sideDodgeOrbitAngle degrees — guaranteed. Sweep speed is fixed
-                // by this math rather than dashSpeed's natural feel.
-                float baseDuration = dashDeceleration > 0f ? dashSpeed / dashDeceleration : 0.01f;
-                float duration = Mathf.Max(0.01f, baseDuration / Mathf.Max(dashLaunchMultiplier, 0.01f));
-                dashOrbitAngularSpeed = (2f * sideDodgeOrbitAngle / duration) * sign;
-                dashOrbitAngularDecel = Mathf.Abs(dashOrbitAngularSpeed) / duration;
-                dashLaunchAngularSpeed = Mathf.Abs(dashOrbitAngularSpeed);
-            }
-            else
-            {
-                // Hard cap: same feel as the straight dash (speed/decel derived from
-                // dashSpeed/dashDeceleration/radius), but stops early if the angle is
-                // reached before natural deceleration would finish.
-                dashOrbitAngularSpeed = (dashSpeed * dashLaunchMultiplier / radius) * Mathf.Rad2Deg * sign;
-                dashOrbitAngularDecel = 0f; // recomputed live from radius each frame in this mode
-                dashLaunchAngularSpeed = Mathf.Abs(dashOrbitAngularSpeed);
-            }
-        }
-        else
-        {
-            velocity = dashDir * dashSpeed * dashLaunchMultiplier;
-            dashLaunchSpeed = velocity.magnitude;
-        }
-
-        animator.SetBool(DashHash, true);
-        if (!string.IsNullOrEmpty(dashStateName))
-            animator.CrossFadeInFixedTime(dashStateName, dashCrossfadeDuration);
-    }
-
-    private void TickDash()
-    {
-        FaceTarget(); // capped turn speed already prevents mismatch — no need to freeze this anymore
-
-        if (dashIsOrbital)
-        {
-            float angularDecel;
-            if (dashAngleSolveFromDuration)
-            {
-                angularDecel = dashOrbitAngularDecel; // fixed at launch
-            }
-            else
-            {
-                float radius = Mathf.Max(orbitRadius, 0.01f);
-                angularDecel = (dashDeceleration * dashLaunchMultiplier / radius) * Mathf.Rad2Deg;
-            }
-
-            dashOrbitAngularSpeed = Mathf.MoveTowards(dashOrbitAngularSpeed, 0f, angularDecel * Time.deltaTime);
-
-            float step = dashOrbitAngularSpeed * Time.deltaTime;
-            if (Mathf.Abs(step) > Mathf.Abs(dashOrbitAngleRemaining))
-                step = dashOrbitAngleRemaining; // don't overshoot past the configured angle, in either mode
-
-            orbitDirection = (Quaternion.AngleAxis(step, Vector3.up) * orbitDirection).normalized;
-            dashOrbitAngleRemaining -= step;
-
-            Vector3 desiredPosition = target.position + orbitDirection * orbitRadius;
-            Vector3 correction = desiredPosition - transform.position;
-            correction.y = 0f;
-            controller.Move(correction + Vector3.up * groundedStickForce * Time.deltaTime);
-            bool doneAngle = Mathf.Abs(dashOrbitAngleRemaining) <= 0.05f;
-            bool doneSpeed = Mathf.Abs(dashOrbitAngularSpeed) <= 0.5f;
-            if (doneAngle || doneSpeed)
-            {
-                EndDash();
-            }
-        }
-        else
-        {
-            float effectiveDeceleration = dashDeceleration * dashLaunchMultiplier;
-            velocity = Vector3.MoveTowards(velocity, Vector3.zero, effectiveDeceleration * Time.deltaTime);
-            Vector3 horizontal = ClampApproachToMinDistance(velocity * Time.deltaTime);
-            controller.Move(horizontal + Vector3.up * groundedStickForce * Time.deltaTime);
-            if (velocity.sqrMagnitude <= 0.0001f)
-            {
-                EndDash();
-            }
-        }
-    }
-
-    private void EndDash()
-    {
-        velocity = Vector3.zero;
-        dashIsOrbital = false;
-        EnterLocomotion();
-        animator.SetBool(DashHash, false);
-        dashCooldownTimer = dashCooldown;
-        jumpLockoutTimer = jumpLockoutAfterDash;
-    }
-
-    // ---------------- Guard ----------------
-
-    [Tooltip("Damage reduction while actively guarding. Higher = blocks more damage. " +
-             "0 = no extra reduction, 1 = fully blocks.")]
-    [Range(0f, 1f)]
-    [SerializeField] private float guardDamageReduction = 0.5f;
-    [Tooltip("Fixed movement speed while guarding. Separate from moveSpeed and NOT affected " +
-             "by Reinforcement — only guard's damage reduction changes with reinforcement tier.")]
-    [SerializeField] private float guardWalkSpeed = 2f;
-
-    public bool IsGuarding => action == ActionState.Guarding;
-    public float GuardDamageReduction => guardDamageReduction;
-    private float lastGuardPressTime = -999f;
-
-    public enum GuardReactionResult { None, TimedBlock, Parry }
-
-    /// Evaluates whether a FRESH Guard press (not one held from well before the window)
-    /// falls within reactionWindowDuration of right now — meant to be called at the exact
-    /// moment a hit lands. Must still be actively guarding when this is called; a press
-    /// followed by an early release doesn't count. Returns the outcome plus a 0-1 quality
-    /// (1 = at parryThreshold or better, 0 = right at the edge of the window) for a caller
-    /// that wants to blend the block strength based on timing precision.
-    public GuardReactionResult EvaluateGuardTiming(float reactionWindowDuration, float parryThreshold, out float quality)
-    {
-        quality = 0f;
-        if (!IsGuarding) return GuardReactionResult.None;
-
-        float timeSincePress = Time.time - lastGuardPressTime;
-        if (timeSincePress > reactionWindowDuration) return GuardReactionResult.None; // press was too long ago — not a timed read
-
-        if (timeSincePress <= parryThreshold)
-        {
-            quality = 1f;
-            return GuardReactionResult.Parry;
-        }
-
-        float range = reactionWindowDuration - parryThreshold;
-        quality = range > 0f ? 1f - Mathf.Clamp01((timeSincePress - parryThreshold) / range) : 0f;
-        return GuardReactionResult.TimedBlock;
-    }
-
-    private void OnGuardPressed()
-    {
-        bool fromRCTInterrupt = action == ActionState.UsingRCT;
-        if (action != ActionState.Locomotion && !fromRCTInterrupt) return;
-
-        if (fromRCTInterrupt) rct?.ForceDeactivate();
-
-        action = ActionState.Guarding;
-        velocity = Vector3.zero;
-        currentSpeed = 0f;
-        speedVelocityRef = 0f;
-        lastGuardPressTime = Time.time;
-        animator.SetBool(GuardHash, true);
-    }
-
-    private void OnGuardReleased()
-    {
-        if (action != ActionState.Guarding) return;
-        EnterLocomotion();
-        animator.SetBool(GuardHash, false);
-    }
-
-    /// Computes movement direction using orbitDirection's own basis when available, falling
-    /// back to actual transform rotation otherwise. Shared by any state that needs its
-    /// movement to stay consistent with the orbital math (Locomotion, Guard, ...).
-    private Vector3 GetOrbitAwareDirection(Vector2 mv, out int snappedX, out int snappedZ)
-    {
-        if (target != null && orbitInitialized)
-        {
-            Vector3 orbitForward = -orbitDirection;
-            Vector3 orbitRight = Vector3.Cross(Vector3.up, orbitForward);
-            return SnapToEightDirections(mv, orbitForward, orbitRight, out snappedX, out snappedZ);
-        }
-
-        return SnapToEightDirections(mv, out snappedX, out snappedZ);
-    }
-
     /// Resolves raw stick input into: dir (snapped, for actual movement translation),
     /// continuousDir/rawAngleDeg (unsnapped, for rotation and category selection),
     /// speedBlend01 (0 = walk, 1 = run, fed to whichever category state is active), and
     /// targetSpeed (walkSpeed, unaffected by Reinforcement, or moveSpeed × Reinforcement's
     /// multiplier). Shared by TickLocomotion, EnterLocomotion, and TickRCT.
-    private bool GetLocomotionMovement(Vector2 mv, out Vector3 continuousDir, out Vector3 rightAxis, out float rawAngleDeg, out float speedBlend01, out float targetSpeed)
+    private bool GetLocomotionMovement(Vector2 mv, out Vector3 continuousDir, out float rawAngleDeg, out float speedBlend01, out float targetSpeed)
     {
         float magnitude = mv.magnitude;
 
@@ -938,7 +680,6 @@ public class PlayerController : MonoBehaviour
             fwd = transform.forward;
             right = transform.right;
         }
-        rightAxis = right;
 
         // Continuous (unsnapped) direction and angle — free/analog movement, used directly
         // for translation, plus character rotation, plus picking which of the 4 animation
@@ -958,6 +699,7 @@ public class PlayerController : MonoBehaviour
         {
             speedBlend01 = 0f;
             targetSpeed = 0f;
+            sprintHoldTimer = 0f; // idle must reset the ramp-up too, not just the anim speed multiplier below — otherwise sprint resumes wherever it left off instead of ramping fresh
             animator.SetFloat(LocomotionSpeedMultiplierHash, 1f); // whole Locomotion_Combat state shares this — must not leak a non-1 value into idle
             return false;
         }
@@ -1032,47 +774,7 @@ public class PlayerController : MonoBehaviour
     /// Picks which of the 4 directional animation states (or Idle) should be active based
     /// on the current input angle, with hysteresis to avoid rapid switching near the
     /// forwardBackThreshold boundary, and CrossFades into it if it changed.
-    private LocomotionAnimCategory previousMoveCategory = LocomotionAnimCategory.Idle;
 
-    /// Computes the exact per-category movement direction each frame (Strafe = precise
-    /// tangent, Forward/Backward = continuousDir) — but blends from the PREVIOUS exact
-    /// direction only for a brief, fixed window right after a category change, not on an
-    /// ongoing basis. This is different from the earlier drift bug: that came from
-    /// permanently lagging behind a target that kept rotating for as long as you kept
-    /// strafing. Here the blend target is always this frame's fresh, correct direction, and
-    /// the window is capped — once it elapses, movement is exactly the fresh direction again
-    /// with zero blending, so there's nothing left to accumulate error over time.
-    private Vector3 GetSmoothedMoveDir(Vector3 continuousDir, Vector3 rightAxis)
-    {
-        Vector3 exactDir = currentAnimCategory switch
-        {
-            LocomotionAnimCategory.StrafeLeft => -rightAxis,
-            LocomotionAnimCategory.StrafeRight => rightAxis,
-            _ => continuousDir
-        };
-
-        if (currentAnimCategory != previousMoveCategory)
-        {
-            moveDirTransitionStart = previousMoveCategory switch
-            {
-                LocomotionAnimCategory.StrafeLeft => -rightAxis,
-                LocomotionAnimCategory.StrafeRight => rightAxis,
-                _ => continuousDir
-            };
-            moveDirTransitionTimer = locomotionBlendSmoothTime;
-            previousMoveCategory = currentAnimCategory;
-        }
-
-        if (moveDirTransitionTimer > 0f)
-        {
-            moveDirTransitionTimer -= Time.deltaTime;
-            float t = 1f - Mathf.Clamp01(moveDirTransitionTimer / Mathf.Max(0.0001f, locomotionBlendSmoothTime));
-            Vector3 blended = Vector3.Slerp(moveDirTransitionStart.normalized, exactDir.normalized, t);
-            return blended.sqrMagnitude > 0.0001f ? blended.normalized : exactDir;
-        }
-
-        return exactDir;
-    }
 
     private void UpdateLocomotionAnimCategory(bool hasInput, float rawAngleDeg, float magnitude)
     {
@@ -1085,7 +787,6 @@ public class PlayerController : MonoBehaviour
         else
         {
             float absAngle = Mathf.Abs(rawAngleDeg);
-            bool currentlyForwardBack = currentAnimCategory == LocomotionAnimCategory.Forward || currentAnimCategory == LocomotionAnimCategory.Backward;
 
             // Extra hysteresis near the walk threshold, where a stick barely pushed is most
             // susceptible to angle noise (small physical jitter is a much bigger fraction of
@@ -1095,11 +796,11 @@ public class PlayerController : MonoBehaviour
             float noiseFactor = 1f - Mathf.Clamp01((magnitude - walkThreshold) / noiseRange);
             float effectiveHysteresis = categoryHysteresis * (1f + noiseFactor * 2f); // up to 3x wider right at the threshold
 
-            float zone = currentlyForwardBack ? forwardBackThreshold + effectiveHysteresis : forwardBackThreshold - effectiveHysteresis;
+            float threshold = forwardBackThreshold;
+            if (currentAnimCategory == LocomotionAnimCategory.Forward) threshold += effectiveHysteresis;
+            else if (currentAnimCategory == LocomotionAnimCategory.Backward) threshold -= effectiveHysteresis;
 
-            if (absAngle <= zone) desired = LocomotionAnimCategory.Forward;
-            else if (absAngle >= 180f - zone) desired = LocomotionAnimCategory.Backward;
-            else desired = rawAngleDeg > 0f ? LocomotionAnimCategory.StrafeRight : LocomotionAnimCategory.StrafeLeft;
+            desired = absAngle <= threshold ? LocomotionAnimCategory.Forward : LocomotionAnimCategory.Backward;
         }
 
         currentAnimCategory = desired;
@@ -1111,8 +812,6 @@ public class PlayerController : MonoBehaviour
         {
             LocomotionAnimCategory.Forward => new Vector2(0f, 1f),
             LocomotionAnimCategory.Backward => new Vector2(0f, -1f),
-            LocomotionAnimCategory.StrafeLeft => new Vector2(-1f, 0f),
-            LocomotionAnimCategory.StrafeRight => new Vector2(1f, 0f),
             _ => Vector2.zero // Idle
         };
 
@@ -1120,36 +819,424 @@ public class PlayerController : MonoBehaviour
         animator.SetFloat(DirXHash, locomotionBlendInput.x);
         animator.SetFloat(DirZHash, locomotionBlendInput.y);
     }
+    // ---------------- Jump ----------------
+
+    private void RecalculateJumpPhysics()
+    {
+        float effectiveHeight = jumpHeight * JumpMultiplier;
+        gravityUp = -(2f * effectiveHeight) / (timeToApex * timeToApex);
+        gravityDown = -(2f * effectiveHeight) / (timeToFall * timeToFall);
+        jumpVelocity = -gravityUp * timeToApex;
+    }
+
+    private void OnJumpPressed()
+    {
+        bool fromLocomotion = action == ActionState.Locomotion && jumpLockoutTimer <= 0f;
+        bool fromDashInterrupt = action == ActionState.Dashing || action == ActionState.DashWindup;
+        bool fromRCTInterrupt = action == ActionState.UsingRCT;
+        bool grounded = airborneTimer <= coyoteTime; // coyote time — still counts as grounded briefly after leaving a ledge
+
+        if ((fromLocomotion || fromDashInterrupt || fromRCTInterrupt) && grounded && jumpCooldownTimer <= 0f && !IsInCombatRange())
+        {
+            if (fromRCTInterrupt) rct?.ForceDeactivate();
+            DoJump();
+            return;
+        }
+
+        // Airborne and couldn't jump — remember the press, fires automatically the instant we land.
+        if (action == ActionState.Jumping)
+            jumpBufferTimer = jumpBufferWindow;
+    }
+
+    private void DoJump()
+    {
+        // Dash's fixed-distance and straight-line branches (unlike the orbital one) move the
+        // character with raw controller.Move(), never touching orbitDirection/orbitRadius —
+        // and jumping can interrupt a dash directly (fromDashInterrupt in OnJumpPressed),
+        // skipping EndDash/EnterLocomotion, which is normally what resyncs this. Without
+        // this, GetOrbitAwareFourDirection below and every subsequent frame's
+        // ApplyOrbitalCorrection in TickJump would use stale, pre-dash orbit data — the
+        // same root cause as the earlier Landing teleport-back bug, just reached via a
+        // different interrupt path this time.
+        SyncOrbitState();
+
+        RecalculateJumpPhysics(); // pick up any runtime inspector tweaks before this jump
+        verticalVelocity = jumpVelocity;
+
+        Vector3 dir = GetOrbitAwareFourDirection(input.MoveInput, out int snappedX, out int snappedZ);
+        velocity = dir.normalized * airHorizontalSpeed * AirSpeedMultiplier;
+        animator.SetFloat(DirXHash, snappedX);
+        animator.SetFloat(DirZHash, snappedZ);
+
+        animator.SetBool(DashHash, false);
+        dashIsOrbital = false; // defensive — jump interrupting an orbital dash shouldn't be reachable, but cheap to guard against
+        dashIsFixedDistance = false;
+        action = ActionState.Jumping;
+        animator.SetTrigger(JumpHash);
+    }
+
+    private void TickJump()
+    {
+        FaceTarget(); // same reasoning as Dash — capped turn speed prevents mismatch, so no need to freeze this
+
+        if (airControl > 0f)
+        {
+            Vector3 dir = GetOrbitAwareFourDirection(input.MoveInput, out _, out _);
+            Vector3 targetAirVelocity = dir.normalized * airHorizontalSpeed * AirSpeedMultiplier;
+            velocity = Vector3.MoveTowards(velocity, targetAirVelocity, airControl * Time.deltaTime);
+        }
+
+        verticalVelocity += (verticalVelocity > 0f ? gravityUp : gravityDown) * Time.deltaTime;
+        Vector3 horizontalDisplacement = ApplyOrbitalCorrection(velocity * Time.deltaTime);
+        Vector3 verticalDisplacement = Vector3.up * verticalVelocity * Time.deltaTime;
+        controller.Move(horizontalDisplacement + verticalDisplacement);
+
+        animator.SetFloat(VerticalVelocityHash, verticalVelocity);
+
+        if (controller.isGrounded && verticalVelocity <= 0f)
+        {
+            verticalVelocity = 0f;
+            jumpCooldownTimer = jumpCooldown;
+
+            if (jumpBufferTimer > 0f)
+            {
+                jumpBufferTimer = 0f;
+                DoJump(); // buffered press — skip Landing entirely, jump immediately
+                return;
+            }
+
+            action = ActionState.Landing;
+            landingTimer = landingRecoveryDuration;
+        }
+    }
+
+    private void EnterLocomotion(bool crossfade = true)
+    {
+        action = ActionState.Locomotion;
+        if (crossfade && !string.IsNullOrEmpty(locomotionStateName))
+            animator.CrossFadeInFixedTime(locomotionStateName, locomotionCrossfadeDuration);
+        // Synchronous, not deferred — a prior attempt to defer this to the end of Update()
+        // caused a worse bug: action flips to Locomotion immediately (synchronous event),
+        // so THIS frame's switch statement already routes to TickLocomotion before a
+        // deferred sync ever got a chance to run, leaving it to use stale orbit data for
+        // one frame and produce a visible snap. Syncing here immediately avoids that. The
+        // original concern (reading position mid-forward-step) isn't a real risk in
+        // practice — the step always finishes many frames before the clip does.
+        SyncOrbitState();
+
+        // Resync to whatever DirX/DirZ actually are right now — Dash (and Jump) set them
+        // directly and instantly, completely bypassing this tracking variable, which
+        // otherwise stays frozen at whatever it was before the interrupting state began.
+        // Starting the smoothing from that stale value instead of the true current pose is
+        // what caused the pop: small/invisible if the stale value happened to be close to
+        // the dash direction, large and visible if they'd diverged (e.g. was idle, then
+        // dashed a totally different direction).
+        locomotionBlendInput = new Vector2(animator.GetFloat(DirXHash), animator.GetFloat(DirZHash));
+
+        // Same fix, same reason, for rotation: smoothedRotationDir is frozen during Dash
+        // (nothing calls RotateTowardsMovementDirection/FaceTargetSmoothed while dashing),
+        // so it's still holding whatever direction it was tracking before the dash even
+        // started. Resync it to the character's actual current facing so the post-dash
+        // blend starts from reality instead of a stale pre-dash value.
+        smoothedRotationDir = transform.forward;
+        smoothedRotationDirVelocity = Vector3.zero;
+
+        bool hasInput = GetLocomotionMovement(input.MoveInput, out _, out float rawAngleDeg, out float speedBlend01, out _);
+        UpdateLocomotionAnimCategory(hasInput, rawAngleDeg, input.MoveInput.magnitude);
+        animator.SetFloat(LocomotionSpeedHash, speedBlend01, dirBlendTime, Time.deltaTime);
+    }
+
+    private void TickLanding()
+    {
+        // Movement input cuts the recovery short instantly — the ANIMATION still transitions
+        // via the native Land -> Locomotion_Combat graph transition (its own set duration),
+        // not a code-forced crossfade. Code-level state (action, movement) switches to
+        // Locomotion right away either way.
+        if (input.MoveInput.sqrMagnitude > 0.01f)
+        {
+            EnterLocomotion(crossfade: false);
+            dashLockoutTimer = dashLockoutAfterLanding;
+            return;
+        }
+
+        landingTimer -= Time.deltaTime;
+        if (landingTimer <= 0f)
+        {
+            EnterLocomotion(crossfade: false);
+            dashLockoutTimer = dashLockoutAfterLanding;
+        }
+    }
+
+    // ---------------- Dash ----------------
+
+    private void OnDashPressed()
+    {
+        bool fromLocomotion = action == ActionState.Locomotion && dashLockoutTimer <= 0f;
+        bool fromLandingInterrupt = action == ActionState.Landing;
+        bool fromRCTInterrupt = action == ActionState.UsingRCT;
+        bool fromAttackInterrupt = action == ActionState.Attacking && combo != null && combo.InPunishWindow;
+        bool stateOk = fromLocomotion || fromLandingInterrupt || fromRCTInterrupt || fromAttackInterrupt;
+
+        if (stateOk && dashCooldownTimer <= 0f)
+        {
+            if (fromRCTInterrupt) rct?.ForceDeactivate();
+            if (fromAttackInterrupt)
+            {
+                combo?.ForceEndCombo();
+            }
+            EnterDashWindup();
+            return;
+        }
+
+        // Blocked only by cooldown (state itself was valid) — remember it, fires once cooldown clears.
+        if (stateOk)
+            dashBufferTimer = dashBufferWindow;
+    }
+
+    private void EnterDashWindup()
+    {
+        action = ActionState.DashWindup;
+        dashAimTimer = dashAimWindow;
+        velocity = Vector3.zero; // frozen during the aim window
+    }
+
+    private void TickDashWindup()
+    {
+        dashAimTimer -= Time.deltaTime;
+
+        if (input.MoveInput.sqrMagnitude > 0.0001f)
+        {
+            LaunchDash(input.MoveInput);
+        }
+        else if (dashAimTimer <= 0f)
+        {
+            // No direction given by the time the window expired — dash simply doesn't happen.
+            EnterLocomotion();
+        }
+    }
+
+    private void LaunchDash(Vector2 aimInput)
+    {
+        if (aimInput.sqrMagnitude <= 0.0001f) return; // shouldn't happen given TickDashWindup, but guard anyway
+
+        int snappedX, snappedZ;
+        Vector3 dashDir;
+        bool nearTarget = IsInCombatRange();
+
+        // Resync before anything reads orbitDirection — state may be stale from before a
+        // jump/landing that interrupted straight into this dash.
+        if (nearTarget && target != null) SyncOrbitState();
+
+        dashDir = GetOrbitAwareFourDirection(aimInput, out snappedX, out snappedZ);
+
+        animator.SetFloat(DirXHash, snappedX);
+        animator.SetFloat(DirZHash, snappedZ);
+
+        action = ActionState.Dashing;
+        dashLaunchMultiplier = DashSpeedMultiplier;
+
+        // Within combat range: lateral becomes a true orbit sweep (unchanged); forward/back
+        // becomes a fixed distance/speed straight-line dash of its own — deliberately NOT
+        // the same physics-deceleration dash used outside combat range, since a short,
+        // controlled, predictable distance is what makes sense at close quarters (and
+        // ClampApproachToMinDistance still prevents a forward one from overshooting
+        // attackRange). Outside combat range, forward/back/lateral all stay the existing
+        // physics-deceleration straight dash, unchanged.
+        dashIsOrbital = nearTarget && snappedX != 0 && target != null;
+        dashIsFixedDistance = nearTarget && snappedX == 0 && target != null;
+
+        if (dashIsOrbital)
+        {
+            // Sign determined by checking which way this direction actually rotates
+            // orbitDirection — reuses the same convention OrbitalDisplacement already uses
+            // and Locomotion already verified correct, instead of guessing independently.
+            Vector3 tangentDir = Vector3.Cross(Vector3.up, orbitDirection);
+            float sign = Mathf.Sign(Vector3.Dot(dashDir, tangentDir));
+            float radius = Mathf.Max(orbitRadius, 0.01f);
+
+            dashOrbitAngleRemaining = sideDodgeOrbitAngle * sign;
+
+            if (dashAngleSolveFromDuration)
+            {
+                // Solved so the sweep finishes in exactly the straight dash's own duration,
+                // at exactly sideDodgeOrbitAngle degrees — guaranteed. Sweep speed is fixed
+                // by this math rather than dashSpeed's natural feel.
+                float baseDuration = dashDeceleration > 0f ? dashSpeed / dashDeceleration : 0.01f;
+                float duration = Mathf.Max(0.01f, baseDuration / Mathf.Max(dashLaunchMultiplier, 0.01f));
+                dashOrbitAngularSpeed = (2f * sideDodgeOrbitAngle / duration) * sign;
+                dashOrbitAngularDecel = Mathf.Abs(dashOrbitAngularSpeed) / duration;
+                dashLaunchAngularSpeed = Mathf.Abs(dashOrbitAngularSpeed);
+            }
+            else
+            {
+                // Hard cap: same feel as the straight dash (speed/decel derived from
+                // dashSpeed/dashDeceleration/radius), but stops early if the angle is
+                // reached before natural deceleration would finish.
+                dashOrbitAngularSpeed = (dashSpeed * dashLaunchMultiplier / radius) * Mathf.Rad2Deg * sign;
+                dashOrbitAngularDecel = 0f; // recomputed live from radius each frame in this mode
+                dashLaunchAngularSpeed = Mathf.Abs(dashOrbitAngularSpeed);
+            }
+        }
+        else if (dashIsFixedDistance)
+        {
+            dashFixedRemaining = inRangeDashDistance;
+            velocity = dashDir * inRangeDashSpeed * dashLaunchMultiplier;
+        }
+        else
+        {
+            velocity = dashDir * dashSpeed * dashLaunchMultiplier;
+            dashLaunchSpeed = velocity.magnitude;
+        }
+
+        animator.SetBool(DashHash, true);
+        if (!string.IsNullOrEmpty(dashStateName))
+            animator.CrossFadeInFixedTime(dashStateName, dashCrossfadeDuration);
+    }
+
+    private void TickDash()
+    {
+        FaceTarget(); // capped turn speed already prevents mismatch — no need to freeze this anymore
+
+        if (dashIsOrbital)
+        {
+            float angularDecel;
+            if (dashAngleSolveFromDuration)
+            {
+                angularDecel = dashOrbitAngularDecel; // fixed at launch
+            }
+            else
+            {
+                float radius = Mathf.Max(orbitRadius, 0.01f);
+                angularDecel = (dashDeceleration * dashLaunchMultiplier / radius) * Mathf.Rad2Deg;
+            }
+
+            dashOrbitAngularSpeed = Mathf.MoveTowards(dashOrbitAngularSpeed, 0f, angularDecel * Time.deltaTime);
+
+            float step = dashOrbitAngularSpeed * Time.deltaTime;
+            if (Mathf.Abs(step) > Mathf.Abs(dashOrbitAngleRemaining))
+                step = dashOrbitAngleRemaining; // don't overshoot past the configured angle, in either mode
+
+            orbitDirection = (Quaternion.AngleAxis(step, Vector3.up) * orbitDirection).normalized;
+            dashOrbitAngleRemaining -= step;
+
+            Vector3 desiredPosition = target.position + orbitDirection * orbitRadius;
+            Vector3 correction = desiredPosition - transform.position;
+            correction.y = 0f;
+            controller.Move(correction + Vector3.up * groundedStickForce * Time.deltaTime);
+            bool doneAngle = Mathf.Abs(dashOrbitAngleRemaining) <= 0.05f;
+            bool doneSpeed = Mathf.Abs(dashOrbitAngularSpeed) <= 0.5f;
+            if (doneAngle || doneSpeed)
+            {
+                EndDash();
+            }
+        }
+        else if (dashIsFixedDistance)
+        {
+            float step = Mathf.Min(inRangeDashSpeed * dashLaunchMultiplier * Time.deltaTime, dashFixedRemaining);
+            Vector3 horizontal = ClampApproachToMinDistance(velocity.normalized * step);
+            controller.Move(horizontal + Vector3.up * groundedStickForce * Time.deltaTime);
+            dashFixedRemaining -= step;
+            if (dashFixedRemaining <= 0f)
+            {
+                EndDash();
+            }
+        }
+        else
+        {
+            float effectiveDeceleration = dashDeceleration * dashLaunchMultiplier;
+            velocity = Vector3.MoveTowards(velocity, Vector3.zero, effectiveDeceleration * Time.deltaTime);
+            Vector3 horizontal = ClampApproachToMinDistance(velocity * Time.deltaTime);
+            controller.Move(horizontal + Vector3.up * groundedStickForce * Time.deltaTime);
+            if (velocity.sqrMagnitude <= 0.0001f)
+            {
+                EndDash();
+            }
+        }
+    }
+
+    private void EndDash()
+    {
+        velocity = Vector3.zero;
+        dashIsOrbital = false;
+        dashIsFixedDistance = false;
+        EnterLocomotion();
+        animator.SetBool(DashHash, false);
+        dashCooldownTimer = dashCooldown;
+        jumpLockoutTimer = jumpLockoutAfterDash;
+    }
+
+    // ---------------- Guard ----------------
+
+    [Tooltip("Damage reduction while actively guarding. Higher = blocks more damage. " +
+             "0 = no extra reduction, 1 = fully blocks.")]
+    [Range(0f, 1f)]
+    [SerializeField] private float guardDamageReduction = 0.5f;
+
+    public bool IsGuarding => action == ActionState.Guarding;
+    public float GuardDamageReduction => guardDamageReduction;
+    private float lastGuardPressTime = -999f;
+
+    public enum GuardReactionResult { None, TimedBlock, Parry }
+
+    /// Evaluates whether a FRESH Guard press (not one held from well before the window)
+    /// falls within reactionWindowDuration of right now — meant to be called at the exact
+    /// moment a hit lands. Must still be actively guarding when this is called; a press
+    /// followed by an early release doesn't count. Returns the outcome plus a 0-1 quality
+    /// (1 = at parryThreshold or better, 0 = right at the edge of the window) for a caller
+    /// that wants to blend the block strength based on timing precision.
+    public GuardReactionResult EvaluateGuardTiming(float reactionWindowDuration, float parryThreshold, out float quality)
+    {
+        quality = 0f;
+        if (!IsGuarding) return GuardReactionResult.None;
+
+        float timeSincePress = Time.time - lastGuardPressTime;
+        if (timeSincePress > reactionWindowDuration) return GuardReactionResult.None; // press was too long ago — not a timed read
+
+        if (timeSincePress <= parryThreshold)
+        {
+            quality = 1f;
+            return GuardReactionResult.Parry;
+        }
+
+        float range = reactionWindowDuration - parryThreshold;
+        quality = range > 0f ? 1f - Mathf.Clamp01((timeSincePress - parryThreshold) / range) : 0f;
+        return GuardReactionResult.TimedBlock;
+    }
+
+    private void OnGuardPressed()
+    {
+        bool fromRCTInterrupt = action == ActionState.UsingRCT;
+        if (action != ActionState.Locomotion && !fromRCTInterrupt) return;
+
+        if (fromRCTInterrupt) rct?.ForceDeactivate();
+
+        action = ActionState.Guarding;
+        velocity = Vector3.zero;
+        currentSpeed = 0f;
+        speedVelocityRef = 0f;
+        lastGuardPressTime = Time.time;
+        animator.SetBool(GuardHash, true);
+    }
+
+    private void OnGuardReleased()
+    {
+        if (action != ActionState.Guarding) return;
+        EnterLocomotion();
+        animator.SetBool(GuardHash, false);
+    }
 
     private void TickGuard()
     {
         FaceTarget(); // still tracks the opponent, same as every other state
 
-        Vector2 mv = input.MoveInput;
-        bool hasInput = mv.sqrMagnitude > 0.0001f;
-        Vector3 dir = GetOrbitAwareDirection(mv, out int snappedX, out int snappedZ);
-
-        // Fixed speed, deliberately NOT scaled by MoveSpeedMultiplier — reinforcement only
-        // affects guard's damage reduction, never its movement speed.
-        if (hasInput)
-        {
-            currentSpeed = Mathf.SmoothDamp(currentSpeed, guardWalkSpeed, ref speedVelocityRef, moveAccelTime);
-            velocity = dir * currentSpeed;
-        }
-        else
-        {
-            currentSpeed = 0f;
-            speedVelocityRef = 0f;
-            velocity = Vector3.zero;
-        }
-
+        // Fully static hold now — no movement at all, single Idle Guard clip, no blend
+        // tree. Reinforcement only ever affected guard's damage reduction, never movement,
+        // so nothing about that changes here.
+        velocity = Vector3.zero;
+        currentSpeed = 0f;
+        speedVelocityRef = 0f;
         Move(velocity);
-
-        // Same shared DirX/DirZ params Locomotion uses — Guard's blend tree reads them too.
-        animator.SetFloat(DirXHash, snappedX, dirBlendTime, Time.deltaTime);
-        animator.SetFloat(DirZHash, snappedZ, dirBlendTime, Time.deltaTime);
     }
-
     // ---------------- Reverse Cursed Technique ----------------
 
     /// Reacts to ReverseCursedTechnique's own activation — this is the only thing
@@ -1170,27 +1257,24 @@ public class PlayerController : MonoBehaviour
     private void TickRCT()
     {
         Vector2 mv = input.MoveInput;
-        bool hasInput = GetLocomotionMovement(mv, out Vector3 continuousDir, out Vector3 rightAxis, out float rawAngleDeg, out float speedBlend01, out float targetSpeed);
+        bool hasInput = GetLocomotionMovement(mv, out Vector3 continuousDir, out float rawAngleDeg, out float speedBlend01, out float targetSpeed);
 
         UpdateLocomotionAnimCategory(hasInput, rawAngleDeg, mv.magnitude);
 
         if (hasInput)
         {
             currentSpeed = Mathf.SmoothDamp(currentSpeed, targetSpeed, ref speedVelocityRef, walkRunTransitionTime);
-
-            Vector3 moveDir = GetSmoothedMoveDir(continuousDir, rightAxis);
-            velocity = moveDir * currentSpeed;
+            velocity = continuousDir * currentSpeed;
 
             if (currentAnimCategory == LocomotionAnimCategory.Forward) RotateTowardsMovementDirection(continuousDir);
-            else if (currentAnimCategory == LocomotionAnimCategory.Backward) RotateTowardsMovementDirection(-continuousDir);
-            else FaceTargetSmoothed();
+            else RotateTowardsMovementDirection(-continuousDir); // Backward
         }
         else
         {
             currentSpeed = 0f;
             speedVelocityRef = 0f;
             velocity = Vector3.zero;
-            FaceTargetSmoothed(); // idle — smoothed to match Strafe (avoids a snap when flipping between them)
+            FaceTargetSmoothed(); // idle
         }
 
         Move(velocity);
@@ -1215,6 +1299,7 @@ public class PlayerController : MonoBehaviour
                 // straight into Attacking instead.
                 velocity = Vector3.zero;
                 dashIsOrbital = false;
+                dashIsFixedDistance = false;
                 animator.SetBool(DashHash, false);
                 dashCooldownTimer = dashCooldown;
                 jumpLockoutTimer = jumpLockoutAfterDash;
@@ -1264,7 +1349,7 @@ public class PlayerController : MonoBehaviour
         // invisible bookkeeping (DirX/DirZ aren't read by the attack's own animation state
         // at all), but it means EnterLocomotion's resync has nothing stale left to catch up
         // on the moment the attack ends, regardless of whether input changed mid-attack.
-        bool attackHasInput = GetLocomotionMovement(input.MoveInput, out _, out _, out float attackRawAngle, out _, out _);
+        bool attackHasInput = GetLocomotionMovement(input.MoveInput, out _, out float attackRawAngle, out _, out _);
         UpdateLocomotionAnimCategory(attackHasInput, attackRawAngle, input.MoveInput.magnitude);
     }
 
@@ -1291,7 +1376,6 @@ public class PlayerController : MonoBehaviour
             EnterLocomotion();
         }
     }
-
     // ---------------- Helpers ----------------
 
     // Authoritative orbit state — evolved purely through rotation, never re-derived from
@@ -1302,13 +1386,10 @@ public class PlayerController : MonoBehaviour
     private Vector3 orbitDirection = Vector3.forward; // world-space, points from target toward player
     private float orbitRadius;
     private bool orbitInitialized;
-    private enum LocomotionAnimCategory { Idle, Forward, Backward, StrafeLeft, StrafeRight }
+    private enum LocomotionAnimCategory { Idle, Forward, Backward }
     private LocomotionAnimCategory currentAnimCategory = LocomotionAnimCategory.Idle;
     private Vector2 locomotionBlendInput; // smoothly damped toward whichever category's fixed point is current — never sits at an arbitrary diagonal
     private Vector2 locomotionBlendVelocity;
-    private Vector3 moveDirTransitionStart; // direction captured at the instant a category change happens
-    private float moveDirTransitionTimer; // counts down from locomotionBlendSmoothTime — once it hits 0, movement uses the exact fresh direction with zero blending, same as before
-
 
     /// Re-anchors the orbit state from the actual current position. Call this at any point
     /// where the character may have moved in a way this system didn't track (entering
@@ -1324,16 +1405,19 @@ public class PlayerController : MonoBehaviour
         orbitInitialized = true;
     }
 
+    /// Applies orbital correction to a horizontal displacement if a target exists — shared
+    /// by Move() (which adds groundedStickForce on top, appropriate while grounded) and
+    /// TickJump (which handles its own vertical velocity from gravity/jump physics instead).
+    private Vector3 ApplyOrbitalCorrection(Vector3 horizontalDisplacement)
+    {
+        if (target == null) return horizontalDisplacement;
+        if (!orbitInitialized) SyncOrbitState();
+        return OrbitalDisplacement(horizontalDisplacement);
+    }
+
     private void Move(Vector3 horizontal)
     {
-        Vector3 displacement = horizontal * Time.deltaTime;
-
-        if (target != null)
-        {
-            if (!orbitInitialized) SyncOrbitState();
-            displacement = OrbitalDisplacement(displacement);
-        }
-
+        Vector3 displacement = ApplyOrbitalCorrection(horizontal * Time.deltaTime);
         controller.Move(displacement + Vector3.up * groundedStickForce * Time.deltaTime);
     }
 
@@ -1361,32 +1445,5 @@ public class PlayerController : MonoBehaviour
         Vector3 correction = desiredPosition - transform.position;
         correction.y = 0f;
         return correction;
-    }
-
-    // ---------------- Gizmos ----------------
-
-    private void OnDrawGizmos()
-    {
-        if (target == null) return;
-
-        Gizmos.color = Color.cyan;
-        DrawGizmoCircle(target.position, combatRange, 48);
-
-        Gizmos.color = Color.red;
-        DrawGizmoCircle(target.position, attackRange, 32);
-    }
-
-    private void DrawGizmoCircle(Vector3 center, float radius, int segments)
-    {
-        if (radius <= 0f) return;
-
-        Vector3 prevPoint = center + new Vector3(radius, 0f, 0f);
-        for (int i = 1; i <= segments; i++)
-        {
-            float angle = (i / (float)segments) * 360f * Mathf.Deg2Rad;
-            Vector3 nextPoint = center + new Vector3(Mathf.Cos(angle) * radius, 0f, Mathf.Sin(angle) * radius);
-            Gizmos.DrawLine(prevPoint, nextPoint);
-            prevPoint = nextPoint;
-        }
     }
 }

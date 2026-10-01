@@ -102,10 +102,10 @@ public partial class @Controls: IInputActionCollection2, IDisposable
                     ""initialStateCheck"": true
                 },
                 {
-                    ""name"": ""Look"",
-                    ""type"": ""Value"",
+                    ""name"": ""Lock"",
+                    ""type"": ""Button"",
                     ""id"": ""6b444451-8a00-4d00-a97e-f47457f736a8"",
-                    ""expectedControlType"": ""Vector2"",
+                    ""expectedControlType"": """",
                     ""processors"": """",
                     ""interactions"": """",
                     ""initialStateCheck"": true
@@ -172,6 +172,15 @@ public partial class @Controls: IInputActionCollection2, IDisposable
                     ""processors"": """",
                     ""interactions"": """",
                     ""initialStateCheck"": false
+                },
+                {
+                    ""name"": ""Look"",
+                    ""type"": ""Value"",
+                    ""id"": ""2d62250b-a0a9-4059-926c-237060e29163"",
+                    ""expectedControlType"": ""Vector2"",
+                    ""processors"": """",
+                    ""interactions"": """",
+                    ""initialStateCheck"": true
                 }
             ],
             ""bindings"": [
@@ -242,79 +251,24 @@ public partial class @Controls: IInputActionCollection2, IDisposable
                     ""isPartOfComposite"": true
                 },
                 {
-                    ""name"": ""ARROWS"",
-                    ""id"": ""e87dd1ec-cec9-4b18-9cf6-afa998c80bc9"",
-                    ""path"": ""2DVector"",
-                    ""interactions"": """",
-                    ""processors"": """",
-                    ""groups"": """",
-                    ""action"": ""Move"",
-                    ""isComposite"": true,
-                    ""isPartOfComposite"": false
-                },
-                {
-                    ""name"": ""up"",
-                    ""id"": ""1b3ef563-b49b-4532-ab30-88738a736efe"",
-                    ""path"": ""<Keyboard>/upArrow"",
-                    ""interactions"": """",
-                    ""processors"": """",
-                    ""groups"": """",
-                    ""action"": ""Move"",
-                    ""isComposite"": false,
-                    ""isPartOfComposite"": true
-                },
-                {
-                    ""name"": ""down"",
-                    ""id"": ""48b0c6fe-122e-4e38-8d1d-91fdb83cd635"",
-                    ""path"": ""<Keyboard>/downArrow"",
-                    ""interactions"": """",
-                    ""processors"": """",
-                    ""groups"": """",
-                    ""action"": ""Move"",
-                    ""isComposite"": false,
-                    ""isPartOfComposite"": true
-                },
-                {
-                    ""name"": ""left"",
-                    ""id"": ""db533a9e-2406-430f-9b0e-d27972d53b84"",
-                    ""path"": ""<Keyboard>/leftArrow"",
-                    ""interactions"": """",
-                    ""processors"": """",
-                    ""groups"": """",
-                    ""action"": ""Move"",
-                    ""isComposite"": false,
-                    ""isPartOfComposite"": true
-                },
-                {
-                    ""name"": ""right"",
-                    ""id"": ""29bba54a-7630-4a4c-8a87-357025312fad"",
-                    ""path"": ""<Keyboard>/rightArrow"",
-                    ""interactions"": """",
-                    ""processors"": """",
-                    ""groups"": """",
-                    ""action"": ""Move"",
-                    ""isComposite"": false,
-                    ""isPartOfComposite"": true
-                },
-                {
                     ""name"": """",
                     ""id"": ""c1f7a91b-d0fd-4a62-997e-7fb9b69bf235"",
-                    ""path"": ""<Gamepad>/rightStick"",
+                    ""path"": ""<DualShockGamepad>/rightStickPress"",
                     ""interactions"": """",
                     ""processors"": """",
                     ""groups"": "";Gamepad"",
-                    ""action"": ""Look"",
+                    ""action"": ""Lock"",
                     ""isComposite"": false,
                     ""isPartOfComposite"": false
                 },
                 {
                     ""name"": """",
-                    ""id"": ""23c4c78d-6865-4f08-a333-cfaf82d7c82b"",
-                    ""path"": ""<Mouse>/delta"",
+                    ""id"": ""bde72a66-79d5-403b-b420-859c39d38672"",
+                    ""path"": ""<Keyboard>/l"",
                     ""interactions"": """",
                     ""processors"": """",
                     ""groups"": """",
-                    ""action"": ""Look"",
+                    ""action"": ""Lock"",
                     ""isComposite"": false,
                     ""isPartOfComposite"": false
                 },
@@ -471,6 +425,50 @@ public partial class @Controls: IInputActionCollection2, IDisposable
                     ""action"": ""Heavy Attack"",
                     ""isComposite"": false,
                     ""isPartOfComposite"": false
+                },
+                {
+                    ""name"": """",
+                    ""id"": ""8c6d9ef2-4040-48a6-9410-b388f8352d2c"",
+                    ""path"": ""<Gamepad>/rightStick"",
+                    ""interactions"": """",
+                    ""processors"": """",
+                    ""groups"": """",
+                    ""action"": ""Look"",
+                    ""isComposite"": false,
+                    ""isPartOfComposite"": false
+                },
+                {
+                    ""name"": ""2D Vector"",
+                    ""id"": ""b21c334d-2018-4a0e-8a8d-fd10f7764971"",
+                    ""path"": ""2DVector"",
+                    ""interactions"": """",
+                    ""processors"": """",
+                    ""groups"": """",
+                    ""action"": ""Look"",
+                    ""isComposite"": true,
+                    ""isPartOfComposite"": false
+                },
+                {
+                    ""name"": ""left"",
+                    ""id"": ""4a63fe56-ca41-4bd0-b5f5-9a1bf2530c3e"",
+                    ""path"": ""<Keyboard>/leftArrow"",
+                    ""interactions"": """",
+                    ""processors"": """",
+                    ""groups"": """",
+                    ""action"": ""Look"",
+                    ""isComposite"": false,
+                    ""isPartOfComposite"": true
+                },
+                {
+                    ""name"": ""right"",
+                    ""id"": ""6bb23290-d575-4918-a82e-d800a4f060c7"",
+                    ""path"": ""<Keyboard>/rightArrow"",
+                    ""interactions"": """",
+                    ""processors"": """",
+                    ""groups"": """",
+                    ""action"": ""Look"",
+                    ""isComposite"": false,
+                    ""isPartOfComposite"": true
                 }
             ]
         },
@@ -1057,7 +1055,7 @@ public partial class @Controls: IInputActionCollection2, IDisposable
         // Player
         m_Player = asset.FindActionMap("Player", throwIfNotFound: true);
         m_Player_Move = m_Player.FindAction("Move", throwIfNotFound: true);
-        m_Player_Look = m_Player.FindAction("Look", throwIfNotFound: true);
+        m_Player_Lock = m_Player.FindAction("Lock", throwIfNotFound: true);
         m_Player_Jump = m_Player.FindAction("Jump", throwIfNotFound: true);
         m_Player_Dash = m_Player.FindAction("Dash", throwIfNotFound: true);
         m_Player_Reinforce = m_Player.FindAction("Reinforce", throwIfNotFound: true);
@@ -1065,6 +1063,7 @@ public partial class @Controls: IInputActionCollection2, IDisposable
         m_Player_Guard = m_Player.FindAction("Guard", throwIfNotFound: true);
         m_Player_LightAttack = m_Player.FindAction("Light Attack", throwIfNotFound: true);
         m_Player_HeavyAttack = m_Player.FindAction("Heavy Attack", throwIfNotFound: true);
+        m_Player_Look = m_Player.FindAction("Look", throwIfNotFound: true);
         // UI
         m_UI = asset.FindActionMap("UI", throwIfNotFound: true);
         m_UI_Navigate = m_UI.FindAction("Navigate", throwIfNotFound: true);
@@ -1159,7 +1158,7 @@ public partial class @Controls: IInputActionCollection2, IDisposable
     private readonly InputActionMap m_Player;
     private List<IPlayerActions> m_PlayerActionsCallbackInterfaces = new List<IPlayerActions>();
     private readonly InputAction m_Player_Move;
-    private readonly InputAction m_Player_Look;
+    private readonly InputAction m_Player_Lock;
     private readonly InputAction m_Player_Jump;
     private readonly InputAction m_Player_Dash;
     private readonly InputAction m_Player_Reinforce;
@@ -1167,6 +1166,7 @@ public partial class @Controls: IInputActionCollection2, IDisposable
     private readonly InputAction m_Player_Guard;
     private readonly InputAction m_Player_LightAttack;
     private readonly InputAction m_Player_HeavyAttack;
+    private readonly InputAction m_Player_Look;
     /// <summary>
     /// Provides access to input actions defined in input action map "Player".
     /// </summary>
@@ -1183,9 +1183,9 @@ public partial class @Controls: IInputActionCollection2, IDisposable
         /// </summary>
         public InputAction @Move => m_Wrapper.m_Player_Move;
         /// <summary>
-        /// Provides access to the underlying input action "Player/Look".
+        /// Provides access to the underlying input action "Player/Lock".
         /// </summary>
-        public InputAction @Look => m_Wrapper.m_Player_Look;
+        public InputAction @Lock => m_Wrapper.m_Player_Lock;
         /// <summary>
         /// Provides access to the underlying input action "Player/Jump".
         /// </summary>
@@ -1215,6 +1215,10 @@ public partial class @Controls: IInputActionCollection2, IDisposable
         /// </summary>
         public InputAction @HeavyAttack => m_Wrapper.m_Player_HeavyAttack;
         /// <summary>
+        /// Provides access to the underlying input action "Player/Look".
+        /// </summary>
+        public InputAction @Look => m_Wrapper.m_Player_Look;
+        /// <summary>
         /// Provides access to the underlying input action map instance.
         /// </summary>
         public InputActionMap Get() { return m_Wrapper.m_Player; }
@@ -1243,9 +1247,9 @@ public partial class @Controls: IInputActionCollection2, IDisposable
             @Move.started += instance.OnMove;
             @Move.performed += instance.OnMove;
             @Move.canceled += instance.OnMove;
-            @Look.started += instance.OnLook;
-            @Look.performed += instance.OnLook;
-            @Look.canceled += instance.OnLook;
+            @Lock.started += instance.OnLock;
+            @Lock.performed += instance.OnLock;
+            @Lock.canceled += instance.OnLock;
             @Jump.started += instance.OnJump;
             @Jump.performed += instance.OnJump;
             @Jump.canceled += instance.OnJump;
@@ -1267,6 +1271,9 @@ public partial class @Controls: IInputActionCollection2, IDisposable
             @HeavyAttack.started += instance.OnHeavyAttack;
             @HeavyAttack.performed += instance.OnHeavyAttack;
             @HeavyAttack.canceled += instance.OnHeavyAttack;
+            @Look.started += instance.OnLook;
+            @Look.performed += instance.OnLook;
+            @Look.canceled += instance.OnLook;
         }
 
         /// <summary>
@@ -1281,9 +1288,9 @@ public partial class @Controls: IInputActionCollection2, IDisposable
             @Move.started -= instance.OnMove;
             @Move.performed -= instance.OnMove;
             @Move.canceled -= instance.OnMove;
-            @Look.started -= instance.OnLook;
-            @Look.performed -= instance.OnLook;
-            @Look.canceled -= instance.OnLook;
+            @Lock.started -= instance.OnLock;
+            @Lock.performed -= instance.OnLock;
+            @Lock.canceled -= instance.OnLock;
             @Jump.started -= instance.OnJump;
             @Jump.performed -= instance.OnJump;
             @Jump.canceled -= instance.OnJump;
@@ -1305,6 +1312,9 @@ public partial class @Controls: IInputActionCollection2, IDisposable
             @HeavyAttack.started -= instance.OnHeavyAttack;
             @HeavyAttack.performed -= instance.OnHeavyAttack;
             @HeavyAttack.canceled -= instance.OnHeavyAttack;
+            @Look.started -= instance.OnLook;
+            @Look.performed -= instance.OnLook;
+            @Look.canceled -= instance.OnLook;
         }
 
         /// <summary>
@@ -1613,12 +1623,12 @@ public partial class @Controls: IInputActionCollection2, IDisposable
         /// <seealso cref="UnityEngine.InputSystem.InputAction.canceled" />
         void OnMove(InputAction.CallbackContext context);
         /// <summary>
-        /// Method invoked when associated input action "Look" is either <see cref="UnityEngine.InputSystem.InputAction.started" />, <see cref="UnityEngine.InputSystem.InputAction.performed" /> or <see cref="UnityEngine.InputSystem.InputAction.canceled" />.
+        /// Method invoked when associated input action "Lock" is either <see cref="UnityEngine.InputSystem.InputAction.started" />, <see cref="UnityEngine.InputSystem.InputAction.performed" /> or <see cref="UnityEngine.InputSystem.InputAction.canceled" />.
         /// </summary>
         /// <seealso cref="UnityEngine.InputSystem.InputAction.started" />
         /// <seealso cref="UnityEngine.InputSystem.InputAction.performed" />
         /// <seealso cref="UnityEngine.InputSystem.InputAction.canceled" />
-        void OnLook(InputAction.CallbackContext context);
+        void OnLock(InputAction.CallbackContext context);
         /// <summary>
         /// Method invoked when associated input action "Jump" is either <see cref="UnityEngine.InputSystem.InputAction.started" />, <see cref="UnityEngine.InputSystem.InputAction.performed" /> or <see cref="UnityEngine.InputSystem.InputAction.canceled" />.
         /// </summary>
@@ -1668,6 +1678,13 @@ public partial class @Controls: IInputActionCollection2, IDisposable
         /// <seealso cref="UnityEngine.InputSystem.InputAction.performed" />
         /// <seealso cref="UnityEngine.InputSystem.InputAction.canceled" />
         void OnHeavyAttack(InputAction.CallbackContext context);
+        /// <summary>
+        /// Method invoked when associated input action "Look" is either <see cref="UnityEngine.InputSystem.InputAction.started" />, <see cref="UnityEngine.InputSystem.InputAction.performed" /> or <see cref="UnityEngine.InputSystem.InputAction.canceled" />.
+        /// </summary>
+        /// <seealso cref="UnityEngine.InputSystem.InputAction.started" />
+        /// <seealso cref="UnityEngine.InputSystem.InputAction.performed" />
+        /// <seealso cref="UnityEngine.InputSystem.InputAction.canceled" />
+        void OnLook(InputAction.CallbackContext context);
     }
     /// <summary>
     /// Interface to implement callback methods for all input action callbacks associated with input actions defined by "UI" which allows adding and removing callbacks.

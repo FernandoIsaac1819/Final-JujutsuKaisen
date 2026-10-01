@@ -4,9 +4,10 @@ using UnityEditor.Animations;
 
 /// <summary>
 /// Custom Inspector for AttackMoveData. Replaces guessing normalized-time floats with a
-/// visual timeline: drag the green/red handles to set Hitbox Active Start/End, and scrub
-/// the slider to see the actual pose live in the Scene view via AnimationMode — as long as
-/// a scene Animator is assigned as the Preview Target.
+/// visual timeline: drag the red diamond markers to set each hit event's precise trigger
+/// time, drag blue diamonds for forward steps, and scrub the slider to see the actual pose
+/// live in the Scene view via AnimationMode — as long as a scene Animator is assigned as
+/// the Preview Target.
 ///
 /// Must be placed in a folder literally named "Editor" anywhere under Assets — that's what
 /// tells Unity this is editor-only code, excluded from builds.
@@ -18,9 +19,9 @@ public class AttackMoveDataEditor : Editor
     private float scrubTime01; // 0-1 normalized
     private bool isPreviewing;
 
-    private enum DragTarget { None, HitboxStart, HitboxEnd, Step }
+    private enum DragTarget { None, HitEvent, Step }
     private DragTarget dragTarget = DragTarget.None;
-    private int dragStepIndex = -1;
+    private int dragIndex = -1;
 
     public override void OnInspectorGUI()
     {
@@ -76,40 +77,45 @@ public class AttackMoveDataEditor : Editor
 
     private void DrawTimeline(Rect rect)
     {
-        SerializedProperty startProp = serializedObject.FindProperty("hitboxActiveStart");
-        SerializedProperty endProp = serializedObject.FindProperty("hitboxActiveEnd");
+        SerializedProperty hitsProp = serializedObject.FindProperty("hitEvents");
         SerializedProperty stepsProp = serializedObject.FindProperty("forwardSteps");
 
         EditorGUI.DrawRect(rect, new Color(0.15f, 0.15f, 0.15f));
 
-        float startX = rect.x + startProp.floatValue * rect.width;
-        float endX = rect.x + endProp.floatValue * rect.width;
-
-        // Highlight the active region between the two hitbox handles.
-        Rect activeRect = new Rect(startX, rect.y, Mathf.Max(1f, endX - startX), rect.height);
-        EditorGUI.DrawRect(activeRect, new Color(1f, 0.3f, 0.3f, 0.35f));
+        // Each hit event's small tolerance window, shaded around its trigger time.
+        for (int i = 0; i < hitsProp.arraySize; i++)
+        {
+            SerializedProperty hitProp = hitsProp.GetArrayElementAtIndex(i);
+            float triggerTime = hitProp.FindPropertyRelative("triggerTime").floatValue;
+            float activeWindow = hitProp.FindPropertyRelative("activeWindow").floatValue;
+            float startX = rect.x + Mathf.Max(0f, triggerTime - activeWindow / 2f) * rect.width;
+            float endX = rect.x + Mathf.Min(1f, triggerTime + activeWindow / 2f) * rect.width;
+            EditorGUI.DrawRect(new Rect(startX, rect.y, Mathf.Max(1f, endX - startX), rect.height), new Color(1f, 0.3f, 0.3f, 0.35f));
+        }
 
         // Scrub position marker.
         float scrubX = rect.x + scrubTime01 * rect.width;
         EditorGUI.DrawRect(new Rect(scrubX - 1f, rect.y, 2f, rect.height), Color.white);
 
-        const float handleWidth = 6f;
-        Rect startHandle = new Rect(startX - handleWidth / 2f, rect.y, handleWidth, rect.height);
-        Rect endHandle = new Rect(endX - handleWidth / 2f, rect.y, handleWidth, rect.height);
-        EditorGUI.DrawRect(startHandle, Color.green);
-        EditorGUI.DrawRect(endHandle, Color.red);
-
-        // One small blue diamond per forward step entry, at its trigger time.
+        // One red diamond per hit event, at its precise trigger time.
         const float diamondHalf = 5f;
+        float midY = rect.y + rect.height / 2f;
+        for (int i = 0; i < hitsProp.arraySize; i++)
+        {
+            float t = hitsProp.GetArrayElementAtIndex(i).FindPropertyRelative("triggerTime").floatValue;
+            float x = rect.x + t * rect.width;
+            DrawDiamond(new Vector2(x, midY), diamondHalf, Color.red);
+        }
+
+        // One blue diamond per forward step entry, at its trigger time.
         for (int i = 0; i < stepsProp.arraySize; i++)
         {
             float t = stepsProp.GetArrayElementAtIndex(i).FindPropertyRelative("triggerTime").floatValue;
             float x = rect.x + t * rect.width;
-            float midY = rect.y + rect.height / 2f;
             DrawDiamond(new Vector2(x, midY), diamondHalf, new Color(0.3f, 0.6f, 1f));
         }
 
-        HandleTimelineInput(rect, startProp, endProp, stepsProp);
+        HandleTimelineInput(rect, hitsProp, stepsProp);
     }
 
     private void DrawDiamond(Vector2 center, float half, Color color)
@@ -125,7 +131,7 @@ public class AttackMoveDataEditor : Editor
         Handles.DrawAAConvexPolygon(points);
     }
 
-    private void HandleTimelineInput(Rect rect, SerializedProperty startProp, SerializedProperty endProp, SerializedProperty stepsProp)
+    private void HandleTimelineInput(Rect rect, SerializedProperty hitsProp, SerializedProperty stepsProp)
     {
         Event e = Event.current;
 
@@ -133,19 +139,23 @@ public class AttackMoveDataEditor : Editor
         {
             float t = Mathf.Clamp01((e.mousePosition.x - rect.x) / rect.width);
 
-            // Find the closest of every draggable marker — hitbox start/end, plus every step.
-            float bestDist = Mathf.Abs(t - startProp.floatValue);
-            dragTarget = DragTarget.HitboxStart;
-            dragStepIndex = -1;
+            // Find the closest of every draggable marker — every hit event, plus every step.
+            dragTarget = DragTarget.None;
+            dragIndex = -1;
+            float bestDist = float.MaxValue;
 
-            float endDist = Mathf.Abs(t - endProp.floatValue);
-            if (endDist < bestDist) { bestDist = endDist; dragTarget = DragTarget.HitboxEnd; }
+            for (int i = 0; i < hitsProp.arraySize; i++)
+            {
+                float hitT = hitsProp.GetArrayElementAtIndex(i).FindPropertyRelative("triggerTime").floatValue;
+                float dist = Mathf.Abs(t - hitT);
+                if (dist < bestDist) { bestDist = dist; dragTarget = DragTarget.HitEvent; dragIndex = i; }
+            }
 
             for (int i = 0; i < stepsProp.arraySize; i++)
             {
                 float stepT = stepsProp.GetArrayElementAtIndex(i).FindPropertyRelative("triggerTime").floatValue;
                 float dist = Mathf.Abs(t - stepT);
-                if (dist < bestDist) { bestDist = dist; dragTarget = DragTarget.Step; dragStepIndex = i; }
+                if (dist < bestDist) { bestDist = dist; dragTarget = DragTarget.Step; dragIndex = i; }
             }
 
             e.Use();
@@ -156,14 +166,11 @@ public class AttackMoveDataEditor : Editor
 
             switch (dragTarget)
             {
-                case DragTarget.HitboxStart:
-                    startProp.floatValue = Mathf.Min(t, endProp.floatValue);
-                    break;
-                case DragTarget.HitboxEnd:
-                    endProp.floatValue = Mathf.Max(t, startProp.floatValue);
+                case DragTarget.HitEvent:
+                    hitsProp.GetArrayElementAtIndex(dragIndex).FindPropertyRelative("triggerTime").floatValue = t;
                     break;
                 case DragTarget.Step:
-                    stepsProp.GetArrayElementAtIndex(dragStepIndex).FindPropertyRelative("triggerTime").floatValue = t;
+                    stepsProp.GetArrayElementAtIndex(dragIndex).FindPropertyRelative("triggerTime").floatValue = t;
                     break;
             }
 
@@ -174,7 +181,7 @@ public class AttackMoveDataEditor : Editor
         else if (e.type == EventType.MouseUp)
         {
             dragTarget = DragTarget.None;
-            dragStepIndex = -1;
+            dragIndex = -1;
         }
     }
 
@@ -210,6 +217,27 @@ public class AttackMoveDataEditor : Editor
         }
 
         return null;
+    }
+
+    private void OnSceneGUI()
+    {
+        if (previewTarget == null) return;
+
+        AttackMoveData move = (AttackMoveData)target;
+        Transform t = previewTarget.transform;
+
+        for (int i = 0; i < move.HitEvents.Count; i++)
+        {
+            AttackMoveData.HitEvent hit = move.HitEvents[i];
+            float halfWindow = hit.activeWindow / 2f;
+            bool active = scrubTime01 >= hit.triggerTime - halfWindow && scrubTime01 <= hit.triggerTime + halfWindow;
+
+            Vector3 center = t.position + t.forward * hit.hitboxForwardOffset + Vector3.up * hit.hitboxHeightOffset;
+            Handles.color = active ? Color.red : Color.white;
+            Handles.DrawWireDisc(center, Vector3.up, hit.hitboxRadius);
+            Handles.DrawWireDisc(center, Vector3.forward, hit.hitboxRadius);
+            Handles.DrawWireDisc(center, Vector3.right, hit.hitboxRadius);
+        }
     }
 
     private void OnDisable()

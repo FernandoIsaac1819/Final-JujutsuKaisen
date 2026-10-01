@@ -60,7 +60,7 @@ Material:
     m_Ints: []
     m_Floats:
     - Vector1_1: 1
-    - Vector1_2: 18
+    - Vector1_2: 15
     - Vector1_33D60835: 0.3
     - Vector1_4A1E97E5: 1
     - _EdgeFalloff: 5
@@ -70,7 +70,7 @@ Material:
     - _QueueOffset: 0
     - _adjust_divide: 34.66
     - _color_gradient_speed: 0.2
-    - _color_gradient_strength: 4
+    - _color_gradient_strength: 3
     - _distortion_noise_scale: 23.8
     - _edge_1: 0
     - _edge_2: 0
@@ -78,7 +78,7 @@ Material:
     - _distortion_speed: {r: -0.1, g: -0.1, b: 0, a: 0}
     - _distortion_stength: {r: 0, g: -0.01, b: 0, a: 0}
     - _distortion_tiling: {r: 3.5, g: 3.5, b: 0, a: 0}
-    - _fire_color: {r: 48.14307, g: 17.58325, b: 32.86316, a: 0}
+    - _fire_color: {r: 36.758343, g: 13.0289, b: 27.000444, a: 0}
     - _tiling_1: {r: 5, g: 5, b: 0, a: 0}
     - _tiling_2: {r: 5, g: 5, b: 0, a: 0}
   m_BuildTextureStacks: []
