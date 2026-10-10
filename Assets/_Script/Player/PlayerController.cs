@@ -32,34 +32,33 @@ public class PlayerController : MonoBehaviour
     public bool CanAttack => action == ActionState.Locomotion ||
         (action == ActionState.Dashing && DashProgress01 >= dashAttackCancelWindow);
 
-    // ---------------- Lock-On ----------------
-    private bool isLockedOn;
-    public bool IsLockedOn => isLockedOn;
+    // ---------------- Targeting ----------------
+    // The game is always locked on — there's no toggle or free-look mode anymore. This
+    // section just finds the fight's TargetGroup, locks onto its Primary, and lets the
+    // player flick-switch between Primary/Secondaries.
     public Transform Target => target;
 
-    /// Fired whenever target is reassigned while locked on (initial lock, or a flick
-    /// switch) — anything with its own independent reference to the enemy (the camera,
-    /// notably) needs to subscribe to this rather than assuming target never changes.
+    /// Fired whenever target is reassigned (initial engage, or a flick switch) — anything
+    /// with its own independent reference to the enemy (the camera, notably) needs to
+    /// subscribe to this rather than assuming target never changes.
     public event Action<Transform> TargetChanged;
 
-    private TargetGroup activeGroup; // the group currently providing targets — found once when lock-on first engages
+    private TargetGroup activeGroup; // the group currently providing targets — found once on startup
     private float prevLookX;
     private float targetSwitchCooldownTimer;
 
-    private void OnLockOnPressed()
+    /// Finds the fight's TargetGroup and locks onto its Primary. Called once on startup —
+    /// there's no toggle to re-trigger this later, but it's harmless to call again (e.g.
+    /// if the target is ever lost) since it always re-resolves from scratch.
+    private void EngageLockOn()
     {
-        isLockedOn = !isLockedOn;
-
-        if (isLockedOn)
+        if (activeGroup == null) activeGroup = FindNearestTargetGroup();
+        if (activeGroup != null)
         {
-            if (activeGroup == null) activeGroup = FindNearestTargetGroup();
-            if (activeGroup != null)
-            {
-                SetTarget(activeGroup.Primary); // ALWAYS the primary on (re)engage, never nearest
-            }
+            SetTarget(activeGroup.Primary); // ALWAYS the primary on engage, never nearest
         }
 
-        Debug.Log($"[LockOn] Toggled {(isLockedOn ? "ON" : "OFF")}, target='{target?.name}'");
+        Debug.Log($"[LockOn] Engaged, target='{target?.name}'");
     }
 
     /// The game is strict 1v1, so there should only ever be one TargetGroup active at a
@@ -197,8 +196,8 @@ public class PlayerController : MonoBehaviour
     [Tooltip("Degrees from straight forward within which input counts as Forward (Backward " +
              "covers the rest). 90 splits the circle evenly in half — there's no separate " +
              "Strafe zone anymore, so no need to leave room for one.")]
-    
-    [SerializeField] private float forwardBackThreshold;
+    [Range(10f, 90f)]
+    [SerializeField] private float forwardBackThreshold = 90f;
     [Tooltip("Extra angular buffer before switching category again once already in one — " +
              "prevents rapid flip-flopping between animations when input hovers near the boundary.")]
     [SerializeField] private float categoryHysteresis = 5f;
@@ -384,16 +383,14 @@ public class PlayerController : MonoBehaviour
         input.DashEvent += OnDashPressed;
         input.GuardEvent += OnGuardPressed;
         input.GuardCanceledEvent += OnGuardReleased;
-        input.LockEvent += OnLockOnPressed;
         if (rct != null) rct.ActiveChanged += OnRCTActiveChanged;
         if (combo != null) combo.ActiveChanged += OnComboActiveChanged;
         if (reinforcement != null) reinforcement.TierChanged += OnReinforcementTierChanged;
         animator.SetFloat(AttackSpeedMultiplierHash, normalAnimSpeed); // initial value, in case Reinforcement never fires an early event
 
-        // Lock on to the primary immediately at startup, rather than requiring a manual
-        // press first. Reuses the exact same engage logic a real press would run — isLockedOn
-        // starts false, so this one call toggles it on and finds/locks the primary.
-        OnLockOnPressed();
+        // The game is always locked on — engage immediately at startup rather than
+        // waiting on a button that no longer exists.
+        EngageLockOn();
     }
 
     private void OnDisable()
@@ -402,7 +399,6 @@ public class PlayerController : MonoBehaviour
         input.DashEvent -= OnDashPressed;
         input.GuardEvent -= OnGuardPressed;
         input.GuardCanceledEvent -= OnGuardReleased;
-        input.LockEvent -= OnLockOnPressed;
         if (rct != null) rct.ActiveChanged -= OnRCTActiveChanged;
         if (combo != null) combo.ActiveChanged -= OnComboActiveChanged;
         if (reinforcement != null) reinforcement.TierChanged -= OnReinforcementTierChanged;
@@ -433,7 +429,7 @@ public class PlayerController : MonoBehaviour
 
         airborneTimer = controller.isGrounded ? 0f : airborneTimer + Time.deltaTime;
 
-        if (isLockedOn) TickTargetSwitch();
+        if (target != null) TickTargetSwitch();
 
         // A buffered dash fires the instant cooldown clears, same idea as jump buffering on landing.
         if (dashBufferTimer > 0f && dashCooldownTimer <= 0f && action == ActionState.Locomotion && dashLockoutTimer <= 0f)
@@ -522,15 +518,15 @@ public class PlayerController : MonoBehaviour
     // ---------------- Gizmos ----------------
 
     [Header("Debug")]
-    [Tooltip("Shows lock-on state and current target as an on-screen overlay during Play Mode.")]
+    [Tooltip("Shows the current lock-on target as an on-screen overlay during Play Mode.")]
     [SerializeField] private bool showLockOnDebugOverlay = true;
 
     private void OnGUI()
     {
         if (!showLockOnDebugOverlay) return;
 
-        GUIStyle style = new GUIStyle { fontSize = 20, normal = { textColor = isLockedOn ? Color.yellow : Color.white } };
-        string text = $"Lock-On: {(isLockedOn ? "ON" : "OFF")}\nTarget: {(target != null ? target.name : "none")}";
+        GUIStyle style = new GUIStyle { fontSize = 20, normal = { textColor = target != null ? Color.yellow : Color.white } };
+        string text = $"Target: {(target != null ? target.name : "none")}";
         GUI.Label(new Rect(10, 10, 400, 60), text, style);
     }
 
@@ -544,11 +540,8 @@ public class PlayerController : MonoBehaviour
         Gizmos.color = Color.red;
         DrawGizmoCircle(target.position, attackRange, 32);
 
-        if (isLockedOn)
-        {
-            Gizmos.color = Color.yellow;
-            Gizmos.DrawWireSphere(target.position + Vector3.up * 1.8f, 0.3f);
-        }
+        Gizmos.color = Color.yellow;
+        Gizmos.DrawWireSphere(target.position + Vector3.up * 1.8f, 0.3f);
     }
 
     private void DrawGizmoCircle(Vector3 center, float radius, int segments)

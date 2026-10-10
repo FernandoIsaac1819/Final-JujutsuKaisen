@@ -23,7 +23,6 @@ public class InputReader : ScriptableObject, Controls.IPlayerActions
     public event Action JumpEvent;          // fired the frame the button is pressed
     public event Action JumpCanceledEvent;  // fired when released (useful later for variable jump height)
     public event Action DashEvent;          // fired the frame the button is pressed
-    public event Action LockEvent;          // fired the frame the lock-on button is pressed
     public event Action ReinforceEvent;    // fired the frame the reinforce button is pressed
     public event Action LightAttackEvent;   // fired the frame the light attack button is pressed
     public event Action LightAttackCanceledEvent; // fired the frame the light attack button is released
@@ -85,10 +84,6 @@ public class InputReader : ScriptableObject, Controls.IPlayerActions
         if (context.performed) DashEvent?.Invoke();
     }
 
-    public void OnLock(InputAction.CallbackContext context)
-    {
-        if (context.performed) LockEvent?.Invoke();
-    }
 
     public void OnReinforce(InputAction.CallbackContext context)
     {

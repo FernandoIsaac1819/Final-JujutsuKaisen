@@ -1,21 +1,15 @@
 using UnityEngine;
 
 /// <summary>
-/// Third-person camera with two modes, switching automatically with PlayerController's
-/// lock-on state:
-///
-/// LOCKED OFF: standard free orbit. Right stick directly drives yaw/pitch around the
-/// player, camera sits behind at a fixed distance/height — exactly like a normal
-/// no-target action game.
-///
-/// LOCKED ON: yaw is driven by the target's position instead of the stick — the camera
+/// Third-person camera, always locked onto PlayerController's current target — there is
+/// no free-look mode. Yaw is driven entirely by the target's position: the camera
 /// continuously reorients to sit behind the player on the opposite side from the target,
-/// keeping the player between camera and enemy. Right stick is freed up for target-switch
-/// flicking (already handled in PlayerController) instead of controlling the camera.
+/// keeping the player between camera and enemy. The right stick is left free for
+/// target-switch flicking (handled in PlayerController) rather than controlling the
+/// camera.
 ///
-/// Both the lock-on toggle and a flick-driven target switch trigger the same reorient
-/// transition (instant snap or smoothed, independently tunable from ongoing follow
-/// damping) via PlayerController.TargetChanged.
+/// A flick-driven target switch triggers a reorient transition (instant snap or smoothed,
+/// independently tunable from ongoing follow damping) via PlayerController.TargetChanged.
 ///
 /// Runs at a very early execution order so it's guaranteed to finish updating the
 /// transform before CinemachineBrain processes the frame. Attach to a CinemachineCamera
@@ -26,9 +20,8 @@ public class LockOnCameraRig : MonoBehaviour
 {
     [Header("Refs")]
     [SerializeField] private Transform player;
-    [Tooltip("Used to read IsLockedOn, Target, and subscribe to TargetChanged.")]
+    [Tooltip("Used to read Target and subscribe to TargetChanged.")]
     [SerializeField] private PlayerController playerController;
-    [SerializeField] private InputReader input;
     [Tooltip("The actual rendered camera — used to read FOV/aspect for the framing math. Defaults to Camera.main if left empty.")]
     [SerializeField] private Camera cam;
 
@@ -37,14 +30,6 @@ public class LockOnCameraRig : MonoBehaviour
     [SerializeField] private float height = 1.8f;
     [Tooltip("Height offset for the look-at point, so the camera aims at roughly chest/head height, not the ground.")]
     [SerializeField] private float lookHeightOffset = 1.5f;
-
-    [Header("Free Look (Locked Off)")]
-    [Tooltip("Degrees/sec at full stick deflection.")]
-    [SerializeField] private float lookSensitivity = 120f;
-    [SerializeField] private float minPitch = -20f;
-    [SerializeField] private float maxPitch = 60f;
-    private float freeYaw;
-    private float freePitch = 15f;
 
     [Header("Locked-On Framing")]
     [SerializeField] private float lockedOnPitch = 15f;
@@ -56,7 +41,7 @@ public class LockOnCameraRig : MonoBehaviour
     [SerializeField] private float positionDamping = 8f;
     [SerializeField] private float rotationDamping = 10f;
 
-    [Header("Reorient Transition (lock-on engage, or target switch)")]
+    [Header("Reorient Transition (target switch)")]
     [Tooltip("If true, the camera instantly snaps to the new framing. If false, it transitions using the damping below instead.")]
     [SerializeField] private bool instantSnapOnReorient = false;
     [SerializeField] private float transitionPositionDamping = 15f;
@@ -71,7 +56,6 @@ public class LockOnCameraRig : MonoBehaviour
     [SerializeField] private float collisionPadding = 0.2f;
 
     private Vector3 currentVelocity;
-    private bool wasLockedOn;
 
     private void Awake()
     {
@@ -88,9 +72,9 @@ public class LockOnCameraRig : MonoBehaviour
         if (playerController != null) playerController.TargetChanged -= OnReorientTriggered;
     }
 
-    /// Fires on lock-on engaging AND on a flick-driven target switch — both are "suddenly
-    /// need to reorient toward a (possibly new) target" moments, so both use the same
-    /// transition mechanism rather than two separate systems.
+    /// Fires whenever the target is (re)assigned — initial engage at game start, or a
+    /// flick-driven target switch — both are "suddenly need to reorient toward a (possibly
+    /// new) target" moments, so both use the same transition mechanism.
     private void OnReorientTriggered(Transform newTarget)
     {
         if (instantSnapOnReorient) snapPending = true;
@@ -101,47 +85,25 @@ public class LockOnCameraRig : MonoBehaviour
     {
         if (player == null || cam == null) return;
 
-        bool isLockedOn = playerController != null && playerController.IsLockedOn;
         Transform target = playerController != null ? playerController.Target : null;
 
-        // Lock-on turning OFF has no corresponding event (TargetChanged only fires when the
-        // target transform itself changes) — detected here instead, so free-look resumes
-        // from the camera's current facing rather than snapping to some stale freeYaw.
-        if (wasLockedOn && !isLockedOn)
-        {
-            Vector3 flatForward = transform.forward;
-            flatForward.y = 0f;
-            if (flatForward.sqrMagnitude > 0.0001f)
-                freeYaw = Quaternion.LookRotation(flatForward, Vector3.up).eulerAngles.y;
-        }
-        wasLockedOn = isLockedOn;
+        // No target yet (e.g. before PlayerController's startup lock-on has resolved one) —
+        // fall back to framing directly behind the player's own facing until one exists.
+        Vector3 behindDir = -player.forward;
+        Vector3 lookPoint = player.position + Vector3.up * lookHeightOffset;
 
-        Vector3 desiredPos;
-        Quaternion desiredRot;
-
-        if (isLockedOn && target != null)
+        if (target != null)
         {
             Vector3 toTarget = target.position - player.position;
             toTarget.y = 0f;
-            Vector3 behindDir = toTarget.sqrMagnitude > 0.001f ? -toTarget.normalized : -player.forward;
+            if (toTarget.sqrMagnitude > 0.001f) behindDir = -toTarget.normalized;
 
-            Quaternion orbitRot = Quaternion.LookRotation(behindDir, Vector3.up) * Quaternion.Euler(lockedOnPitch, 0f, 0f);
-            desiredPos = player.position + orbitRot * Vector3.forward * distance + Vector3.up * height;
-
-            Vector3 lookPoint = Vector3.Lerp(player.position, target.position, lookAtTargetBias) + Vector3.up * lookHeightOffset;
-            desiredRot = Quaternion.LookRotation((lookPoint - desiredPos).normalized, Vector3.up);
+            lookPoint = Vector3.Lerp(player.position, target.position, lookAtTargetBias) + Vector3.up * lookHeightOffset;
         }
-        else
-        {
-            freeYaw += input.LookInput.x * lookSensitivity * Time.deltaTime;
-            freePitch = Mathf.Clamp(freePitch - input.LookInput.y * lookSensitivity * Time.deltaTime, minPitch, maxPitch);
 
-            Quaternion orbitRot = Quaternion.Euler(freePitch, freeYaw, 0f);
-            desiredPos = player.position + orbitRot * Vector3.back * distance + Vector3.up * height;
-
-            Vector3 lookPoint = player.position + Vector3.up * lookHeightOffset;
-            desiredRot = Quaternion.LookRotation((lookPoint - desiredPos).normalized, Vector3.up);
-        }
+        Quaternion orbitRot = Quaternion.LookRotation(behindDir, Vector3.up) * Quaternion.Euler(lockedOnPitch, 0f, 0f);
+        Vector3 desiredPos = player.position + orbitRot * Vector3.forward * distance + Vector3.up * height;
+        Quaternion desiredRot = Quaternion.LookRotation((lookPoint - desiredPos).normalized, Vector3.up);
 
         desiredPos = ApplyCollision(player.position + Vector3.up * height, desiredPos);
 
@@ -164,9 +126,7 @@ public class LockOnCameraRig : MonoBehaviour
     }
 
     /// Spring-arm-style push-in — casts from roughly the player's chest toward the desired
-    /// camera position, pulling the camera closer if geometry is in the way. Wasn't needed
-    /// for the old side-view rig (it always sat out at fighting-game distance), but a
-    /// behind-the-player camera sits close enough to walls/geometry that this matters now.
+    /// camera position, pulling the camera closer if geometry is in the way.
     private Vector3 ApplyCollision(Vector3 from, Vector3 desired)
     {
         Vector3 offset = desired - from;

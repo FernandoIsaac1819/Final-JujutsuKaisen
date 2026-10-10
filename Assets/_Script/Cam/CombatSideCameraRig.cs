@@ -88,7 +88,6 @@ public class CombatSideCameraRig : MonoBehaviour
 
     private void OnEnable()
     {
-        if (input != null) input.LockEvent += FlipSide;
         if (playerController != null)
         {
             playerController.TargetChanged += OnTargetChanged;
@@ -98,7 +97,6 @@ public class CombatSideCameraRig : MonoBehaviour
 
     private void OnDisable()
     {
-        if (input != null) input.LockEvent -= FlipSide;
         if (playerController != null) playerController.TargetChanged -= OnTargetChanged;
     }
 
