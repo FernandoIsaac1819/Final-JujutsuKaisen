@@ -3,8 +3,10 @@ using UnityEngine;
 
 /// Locked-on player. Owns the current state (Player/States) and decides when to switch:
 /// input and gameplay events come in here, the active state's Tick does the per-frame
-/// work. PlayerMotor moves the CharacterController, PlayerTargeting handles lock-on, and
-/// tuning lives in a PlayerSettings asset. Requires CharacterController + Animator.
+/// work. PlayerMotor moves the CharacterController, PlayerTargeting handles lock-on,
+/// PlayerAnimation is the only Animator writer (each state plays its own animation in
+/// Enter), and tuning lives in a PlayerSettings asset. Requires CharacterController +
+/// Animator.
 [RequireComponent(typeof(CharacterController))]
 [RequireComponent(typeof(Animator))]
 public class PlayerController : MonoBehaviour
@@ -23,12 +25,6 @@ public class PlayerController : MonoBehaviour
     [SerializeField] private ReverseCursedTechnique rct;
     [Tooltip("Optional. Movement is locked while a combo is active.")]
     [SerializeField] private ComboController combo;
-
-    [Header("Animator states")]
-    [SerializeField] private string locomotionStateName = "Locomotion_Combat";
-    [SerializeField] private float locomotionCrossfadeDuration = 0.3f;
-    [SerializeField] private string dashStateName = "Directional_Dash";
-    [SerializeField] private float dashCrossfadeDuration = 0.05f;
 
     [Header("Debug")]
     [SerializeField] private bool showLockOnDebugOverlay = true;
@@ -70,7 +66,7 @@ public class PlayerController : MonoBehaviour
 
     internal PlayerSettings Settings => settings;
     internal InputReader Input => input;
-    internal Animator Animator { get; private set; }
+    internal PlayerAnimation Anim { get; private set; }
     internal PlayerMotor Motor { get; private set; }
     internal PlayerCooldowns Cooldowns { get; } = new PlayerCooldowns();
     internal LocomotionState Locomotion => locomotion;
@@ -95,23 +91,11 @@ public class PlayerController : MonoBehaviour
         to.Enter();
     }
 
-    /// crossfade: false when the Animator transitions to Locomotion on its own.
-    internal void EnterLocomotion(bool crossfade = true)
+    /// fade: crossfade into the Locomotion animation; null = the default.
+    internal void EnterLocomotion(float? fade = null)
     {
-        locomotion.CrossfadeOnEnter = crossfade;
+        locomotion.EnterFade = fade;
         ChangeState(ActionState.Locomotion, reenter: true);
-    }
-
-    internal void CrossfadeToLocomotion()
-    {
-        if (!string.IsNullOrEmpty(locomotionStateName))
-            Animator.CrossFadeInFixedTime(locomotionStateName, locomotionCrossfadeDuration);
-    }
-
-    internal void CrossfadeToDash()
-    {
-        if (!string.IsNullOrEmpty(dashStateName))
-            Animator.CrossFadeInFixedTime(dashStateName, dashCrossfadeDuration);
     }
 
     // ================================================================ State
@@ -127,8 +111,6 @@ public class PlayerController : MonoBehaviour
 
     private void Awake()
     {
-        Animator = GetComponent<Animator>();
-
         if (settings == null)
         {
             Debug.LogError($"[PlayerController] '{name}' has no PlayerSettings asset assigned.", this);
@@ -138,6 +120,7 @@ public class PlayerController : MonoBehaviour
 
         targeting = new PlayerTargeting(input, transform, target);
         Motor = new PlayerMotor(GetComponent<CharacterController>(), settings, () => targeting.Target);
+        Anim = new PlayerAnimation(GetComponent<Animator>(), settings.animation);
         targeting.Changed += OnTargetChanged;
 
         locomotion = new LocomotionState(this);
@@ -157,8 +140,8 @@ public class PlayerController : MonoBehaviour
         states[(int)ActionState.Attacking] = attack;
         states[(int)ActionState.Hitstun] = hitstun;
 
-        Animator.SetFloat(PlayerAnimParams.AttackSpeedMultiplier, settings.combat.attackAnimSpeed);
-        Animator.SetFloat(PlayerAnimParams.LocomotionSpeedMultiplier, 1f);
+        Anim.SetAttackSpeed(settings.combat.attackAnimSpeed);
+        Anim.SetRunAnimSpeed(1f);
     }
 
     private void OnEnable()
@@ -172,7 +155,7 @@ public class PlayerController : MonoBehaviour
         if (rct != null) rct.ActiveChanged += OnRCTActiveChanged;
         if (combo != null) combo.ActiveChanged += OnComboActiveChanged;
         if (reinforcement != null) reinforcement.TierChanged += OnReinforcementTierChanged;
-        Animator.SetFloat(PlayerAnimParams.AttackSpeedMultiplier, settings.combat.attackAnimSpeed);
+        Anim.SetAttackSpeed(settings.combat.attackAnimSpeed);
 
         targeting.Engage(); // always locked on
     }
@@ -208,9 +191,6 @@ public class PlayerController : MonoBehaviour
             debugOrbitRadius = Motor.OrbitRadius;
             debugActualDistance = Vector3.Distance(transform.position, Target.position);
         }
-
-        Animator.SetBool(PlayerAnimParams.Grounded, Motor.IsGrounded);
-        Animator.SetBool(PlayerAnimParams.Landing, action == ActionState.Landing);
     }
 
     // ================================================================ Transitions
@@ -263,7 +243,7 @@ public class PlayerController : MonoBehaviour
 
     private void OnGuardReleased()
     {
-        if (action == ActionState.Guarding) EnterLocomotion();
+        if (action == ActionState.Guarding) EnterLocomotion(Anim.LocomotionFromGuardFade);
     }
 
     private void OnRCTActiveChanged(bool active)
@@ -305,8 +285,7 @@ public class PlayerController : MonoBehaviour
     /// apply, so this stays in sync with movement speed.
     private void OnReinforcementTierChanged(Reinforcement.Tier tier)
     {
-        float value = tier == Reinforcement.Tier.Off ? settings.combat.attackAnimSpeed : reinforcement.ReinforcedAnimSpeed;
-        Animator.SetFloat(PlayerAnimParams.AttackSpeedMultiplier, value);
+        Anim.SetAttackSpeed(tier == Reinforcement.Tier.Off ? settings.combat.attackAnimSpeed : reinforcement.ReinforcedAnimSpeed);
     }
 
     // ================================================================ Debug drawing

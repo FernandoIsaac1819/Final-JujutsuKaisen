@@ -2,12 +2,14 @@ using UnityEngine;
 
 /// A committed directional jump. Horizontal velocity lives in the orbit frame, so a side
 /// jump arcs around the target. Optional air control steers past the dead zone;
-/// releasing the stick keeps momentum.
+/// releasing the stick keeps momentum. Animation: the directional rise, then the fall
+/// pose once vertical velocity turns downward.
 public class JumpState : PlayerState
 {
     private float gravityUp, gravityDown;
     private float verticalVelocity;
     private Vector2 airLocalVelocity; // x = right, y = toward target
+    private bool falling;
 
     public JumpState(PlayerController p) : base(p) { }
 
@@ -31,7 +33,12 @@ public class JumpState : PlayerState
 
         verticalVelocity += (verticalVelocity > 0f ? gravityUp : gravityDown) * Time.deltaTime;
         Motor.MoveAir(p.Velocity * Time.deltaTime, verticalVelocity * Time.deltaTime);
-        Animator.SetFloat(PlayerAnimParams.VerticalVelocity, verticalVelocity);
+
+        if (!falling && verticalVelocity < 0f && !Motor.IsGrounded)
+        {
+            falling = true;
+            Anim.PlayFall();
+        }
 
         if (Motor.IsGrounded && verticalVelocity <= 0f)
         {
@@ -70,8 +77,7 @@ public class JumpState : PlayerState
         airLocalVelocity = new Vector2(snappedX, snappedZ) * Jump.airSpeed * p.AirSpeedMultiplier;
         p.Velocity = Motor.LocalToWorld(airLocalVelocity);
 
-        Animator.SetFloat(PlayerAnimParams.DirX, snappedX);
-        Animator.SetFloat(PlayerAnimParams.DirZ, snappedZ);
-        Animator.SetTrigger(PlayerAnimParams.Jump);
+        falling = false;
+        Anim.PlayJump(snappedX, snappedZ);
     }
 }

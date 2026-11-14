@@ -12,7 +12,7 @@ public class GuardState : PlayerState
     {
         p.Velocity = Vector3.zero;
         pressTime = Time.time;
-        Animator.SetBool(PlayerAnimParams.Guard, true);
+        Anim.PlayGuard();
     }
 
     public override void Tick()
@@ -21,8 +21,6 @@ public class GuardState : PlayerState
         p.Velocity = Vector3.zero;
         Motor.Move(Vector3.zero);
     }
-
-    public override void Exit() => Animator.SetBool(PlayerAnimParams.Guard, false);
 
     /// A guard press within reactionWindow of the hit is a timed block (within
     /// parryThreshold, a parry). Quality is 1 at parry timing, 0 at the window's edge.

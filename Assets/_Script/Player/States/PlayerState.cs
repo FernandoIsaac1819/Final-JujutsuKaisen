@@ -1,8 +1,7 @@
-using UnityEngine;
-
 /// One action the player can be in (Locomotion, Jump, Dash...). PlayerController calls
 /// Exit on the old state and Enter on the new one, so each state sets itself up and
-/// cleans up after itself; Tick runs every frame while it's active.
+/// cleans up after itself; Tick runs every frame while it's active. A state that has its
+/// own animation plays it in Enter, through Anim.
 public abstract class PlayerState
 {
     protected readonly PlayerController p;
@@ -14,7 +13,7 @@ public abstract class PlayerState
     public virtual void Exit() { }
 
     protected PlayerMotor Motor => p.Motor;
-    protected Animator Animator => p.Animator;
+    protected PlayerAnimation Anim => p.Anim;
     protected InputReader Input => p.Input;
     protected PlayerCooldowns Cooldowns => p.Cooldowns;
 

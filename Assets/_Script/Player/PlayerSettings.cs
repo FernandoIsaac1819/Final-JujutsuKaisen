@@ -11,6 +11,37 @@ public class PlayerSettings : ScriptableObject
     public JumpSettings jump = new JumpSettings();
     public DashSettings dash = new DashSettings();
     public CombatSettings combat = new CombatSettings();
+    public AnimationSettings animation = new AnimationSettings();
+}
+
+/// Animator state names and the crossfade into each. Code decides which state plays;
+/// the Animator graph only blends within a state.
+[Serializable]
+public class AnimationSettings
+{
+    [Header("Locomotion")]
+    public string locomotionState = "Locomotion_Combat";
+    [Tooltip("Crossfade into Locomotion from most states.")]
+    public float locomotionFade = 0.3f;
+    [Tooltip("Crossfade into Locomotion when landing recovery ends.")]
+    public float locomotionFromLandFade = 0.25f;
+    [Tooltip("Crossfade into Locomotion when releasing Guard.")]
+    public float locomotionFromGuardFade = 0.4f;
+
+    [Header("Jump")]
+    public string jumpState = "Jump rise";
+    public float jumpFade = 0.1f;
+    [Tooltip("Played once the jump starts falling.")]
+    public string fallState = "Fall neutral";
+    public float fallFade = 0.2f;
+    public string landState = "Land";
+    public float landFade = 0.1f;
+
+    [Header("Other")]
+    public string dashState = "Directional_Dash";
+    public float dashFade = 0.05f;
+    public string guardState = "Guard neutral";
+    public float guardFade = 0.2f;
 }
 
 [Serializable]

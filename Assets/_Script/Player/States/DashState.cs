@@ -30,8 +30,7 @@ public class DashState : PlayerState
     public override void Enter()
     {
         Vector3 dashDir = SnapToFourDirections(Input.MoveInput, out int snappedX, out int snappedZ);
-        Animator.SetFloat(PlayerAnimParams.DirX, snappedX);
-        Animator.SetFloat(PlayerAnimParams.DirZ, snappedZ);
+        Anim.PlayDash(snappedX, snappedZ);
 
         bool nearTarget = p.IsInCombatRange();
         kind = !nearTarget ? Kind.Straight : snappedX != 0 ? Kind.Orbital : Kind.FixedDistance;
@@ -71,9 +70,6 @@ public class DashState : PlayerState
                 launchSpeed = p.Velocity.magnitude;
                 break;
         }
-
-        Animator.SetBool(PlayerAnimParams.Dash, true);
-        p.CrossfadeToDash();
     }
 
     public override void Tick()
@@ -118,7 +114,6 @@ public class DashState : PlayerState
         p.Velocity = Vector3.zero;
         kind = Kind.Straight;
         launchSpeed = 0f;
-        Animator.SetBool(PlayerAnimParams.Dash, false);
     }
 
     /// Starts the cooldowns that follow a completed (or attack-cancelled) dash.

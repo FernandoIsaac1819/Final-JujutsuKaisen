@@ -21,19 +21,19 @@ public class LocomotionState : PlayerState
 
     public LocomotionState(PlayerController p) : base(p) { }
 
-    /// Set by PlayerController.EnterLocomotion before entering. False when the Animator
-    /// already transitions on its own (Land -> Locomotion).
-    public bool CrossfadeOnEnter { get; set; } = true;
+    /// Set by PlayerController.EnterLocomotion before entering; null = the default fade.
+    public float? EnterFade { get; set; }
 
     /// Re-anchors all smoothing to the current reality: the previous state moved, rotated
     /// and animated the character by other means.
     public override void Enter()
     {
-        if (CrossfadeOnEnter) p.CrossfadeToLocomotion();
-        CrossfadeOnEnter = true;
+        if (EnterFade.HasValue) Anim.PlayLocomotion(EnterFade.Value);
+        else Anim.PlayLocomotion();
+        EnterFade = null;
 
         // Start blends from the Animator's actual values (Dash/Jump write DirZ directly).
-        dirZBlend = Animator.GetFloat(PlayerAnimParams.DirZ);
+        dirZBlend = Anim.CurrentDirZ;
         dirZBlendVelocity = 0f;
         moveAmountBlendVelocity = 0f;
 
@@ -58,8 +58,8 @@ public class LocomotionState : PlayerState
         // MoveAmount is only read by the Locomotion state, which isn't visible yet, so snap
         // it. DirZ is not snapped: the outgoing Dash/Jump trees still read it.
         moveAmountBlend = category == Category.Idle ? 0f : 1f;
-        Animator.SetFloat(PlayerAnimParams.MoveAmount, moveAmountBlend);
-        Animator.SetFloat(PlayerAnimParams.LocomotionSpeed, speedBlend01, Loco.walkRunBlendDamp, Time.deltaTime);
+        Anim.SetMoveAmount(moveAmountBlend);
+        Anim.SetWalkRun(speedBlend01, Loco.walkRunBlendDamp);
     }
 
     /// Order matters: category decides facing; the blend reads actual facing vs. actual
@@ -81,7 +81,7 @@ public class LocomotionState : PlayerState
         // Hold walk/run through the grace window instead of easing toward walk mid-flick.
         if (hasInput) lastSpeedBlend01 = speedBlend01;
         else if (moving) speedBlend01 = lastSpeedBlend01;
-        Animator.SetFloat(PlayerAnimParams.LocomotionSpeed, speedBlend01, Loco.walkRunBlendDamp, Time.deltaTime);
+        Anim.SetWalkRun(speedBlend01, Loco.walkRunBlendDamp);
     }
 
     /// While another state (an attack) is active, keep the category current so it can end
@@ -116,7 +116,7 @@ public class LocomotionState : PlayerState
             speedBlend01 = 0f;
             targetSpeed = 0f;
             sprintHoldTimer = 0f;
-            Animator.SetFloat(PlayerAnimParams.LocomotionSpeedMultiplier, 1f); // shared by the whole state, incl. Idle
+            Anim.SetRunAnimSpeed(1f); // shared by the whole state, incl. Idle
             return false;
         }
 
@@ -145,7 +145,7 @@ public class LocomotionState : PlayerState
                 ? reinforcement.ReinforcedAnimSpeed
                 : Mathf.Lerp(1f, Loco.sprintMaxAnimSpeed, sprintRampT);
         }
-        Animator.SetFloat(PlayerAnimParams.LocomotionSpeedMultiplier, animSpeed);
+        Anim.SetRunAnimSpeed(animSpeed);
 
         targetSpeed = isRunning
             ? Loco.runSpeed * p.MoveSpeedMultiplier + Loco.sprintMaxBonus * sprintRampT
@@ -261,7 +261,6 @@ public class LocomotionState : PlayerState
 
         moveAmountBlend = Mathf.SmoothDamp(moveAmountBlend, moving ? 1f : 0f, ref moveAmountBlendVelocity, Loco.blendSmoothTime);
         dirZBlend = Mathf.SmoothDamp(dirZBlend, targetDirZ, ref dirZBlendVelocity, Loco.blendSmoothTime);
-        Animator.SetFloat(PlayerAnimParams.MoveAmount, moveAmountBlend);
-        Animator.SetFloat(PlayerAnimParams.DirZ, dirZBlend);
+        Anim.SetLocomotionBlend(moveAmountBlend, dirZBlend);
     }
 }

@@ -7,26 +7,28 @@ public class LandingState : PlayerState
 
     public LandingState(PlayerController p) : base(p) { }
 
-    public override void Enter() => timer = Jump.landingRecovery;
+    public override void Enter()
+    {
+        timer = Jump.landingRecovery;
+        Anim.PlayLand();
+    }
 
     public override void Tick()
     {
-        // Cancel: crossfade from code, since this path never sets Landing=true and Jump
-        // rise's own exit (DirZ > 0.4) misses backpedals.
         if (Input.MoveInput.magnitude >= Loco.walkThreshold)
         {
-            Finish(crossfade: true);
+            Finish(null); // cancelled by input: default Locomotion fade
             return;
         }
 
         timer -= Time.deltaTime;
         if (timer <= 0f)
-            Finish(crossfade: false); // Land -> Locomotion via the Animator
+            Finish(Anim.LocomotionFromLandFade);
     }
 
-    private void Finish(bool crossfade)
+    private void Finish(float? fade)
     {
-        p.EnterLocomotion(crossfade);
+        p.EnterLocomotion(fade);
         Cooldowns.dashLockout = Dash.lockoutAfterLanding;
     }
 }
