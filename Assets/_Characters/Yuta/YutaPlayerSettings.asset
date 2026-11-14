@@ -1,0 +1,63 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 16d270a51aa54e36b041c8c4fa19d22d, type: 3}
+  m_Name: YutaPlayerSettings
+  m_EditorClassIdentifier: Assembly-CSharp::PlayerSettings
+  locomotion:
+    runSpeed: 8
+    walkSpeed: 2
+    walkThreshold: 0.15
+    runThreshold: 0.8
+    velocitySmoothTime: 0.15
+    idleInputGraceTime: 0.1
+    groundStickForce: -2
+    sprintBuildupDelay: 1.5
+    sprintRampDuration: 3
+    sprintMaxBonus: 2
+    sprintMaxAnimSpeed: 1.15
+    sprintWhileReinforced: 1
+    blendSmoothTime: 0.06
+    walkRunBlendDamp: 0.1
+  facing:
+    forwardBackThreshold: 100
+    categoryHysteresis: 5
+    turnSpeed: 720
+    smoothTime: 0.1
+  jump:
+    height: 1.5
+    timeToApex: 0.4
+    timeToFall: 0.3
+    airSpeed: 10
+    airControl: 0
+    cooldown: 0.5
+    lockoutAfterDash: 0.2
+    coyoteTime: 0.1
+    bufferWindow: 0.15
+    landingRecovery: 0.1
+  dash:
+    speed: 13
+    deceleration: 25
+    sideDodgeAngle: 90
+    solveAngleFromDuration: 1
+    inRangeDistance: 4
+    inRangeSpeed: 10
+    aimWindow: 0.2
+    cooldown: 0.3
+    attackCancelWindow: 0.3
+    lockoutAfterLanding: 0.25
+    bufferWindow: 0.15
+  combat:
+    combatRange: 7
+    attackRange: 1.2
+    guardDamageReduction: 0.5
+    knockbackDecay: 15
+    attackAnimSpeed: 1
