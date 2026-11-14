@@ -297,28 +297,51 @@ BlendTree:
     m_DirectBlendParameter: Speed
     m_Mirror: 0
   - serializedVersion: 2
-    m_Motion: {fileID: 8531283076460091567}
+    m_Motion: {fileID: 6143509827734210951}
     m_Threshold: 1
-    m_Position: {x: 0, y: 1}
+    m_Position: {x: 0, y: 0}
+    m_TimeScale: 1
+    m_CycleOffset: 0
+    m_DirectBlendParameter: DirZ
+    m_Mirror: 0
+  m_BlendParameter: MoveAmount
+  m_BlendParameterY: DirZ
+  m_MinThreshold: 0
+  m_MaxThreshold: 1
+  m_UseAutomaticThresholds: 0
+  m_NormalizedBlendValues: 0
+  m_BlendType: 0
+--- !u!206 &6143509827734210951
+BlendTree:
+  m_ObjectHideFlags: 1
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_Name: Moving
+  m_Childs:
+  - serializedVersion: 2
+    m_Motion: {fileID: -5583767929512794477}
+    m_Threshold: -1
+    m_Position: {x: 0, y: 0}
     m_TimeScale: 1
     m_CycleOffset: 0
     m_DirectBlendParameter: DirZ
     m_Mirror: 0
   - serializedVersion: 2
-    m_Motion: {fileID: -5583767929512794477}
-    m_Threshold: 2
-    m_Position: {x: 0, y: -1}
+    m_Motion: {fileID: 8531283076460091567}
+    m_Threshold: 1
+    m_Position: {x: 0, y: 0}
     m_TimeScale: 1
     m_CycleOffset: 0
     m_DirectBlendParameter: DirZ
     m_Mirror: 0
-  m_BlendParameter: DirX
-  m_BlendParameterY: DirZ
-  m_MinThreshold: 0
-  m_MaxThreshold: 2
+  m_BlendParameter: DirZ
+  m_BlendParameterY: DirX
+  m_MinThreshold: -1
+  m_MaxThreshold: 1
   m_UseAutomaticThresholds: 0
   m_NormalizedBlendValues: 0
-  m_BlendType: 3
+  m_BlendType: 0
 --- !u!1102 &-4304859074739488029
 AnimatorState:
   serializedVersion: 6
@@ -732,6 +755,12 @@ AnimatorController:
   m_Name: PlayerAnimator
   serializedVersion: 5
   m_AnimatorParameters:
+  - m_Name: MoveAmount
+    m_Type: 1
+    m_DefaultFloat: 0
+    m_DefaultInt: 0
+    m_DefaultBool: 0
+    m_Controller: {fileID: 9100000}
   - m_Name: DirZ
     m_Type: 1
     m_DefaultFloat: 0

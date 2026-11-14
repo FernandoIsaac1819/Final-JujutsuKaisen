@@ -83,14 +83,14 @@ public class PlayerController : MonoBehaviour
         return nearest;
     }
 
-    /// Reassigns target and does everything that MUST happen alongside that: resyncing
-    /// orbit state (otherwise the next orbital correction snaps toward the new target using
-    /// direction/radius data that belonged to the old one — this is what was causing the
-    /// teleport bug) and notifying anything with its own independent reference to the enemy.
+    /// Reassigns target and does everything that MUST happen alongside that: taking the
+    /// new target's distance as the intended radius (otherwise the next orbit step pulls
+    /// the player to the OLD distance around the new target) and notifying anything with
+    /// its own independent reference to the enemy.
     private void SetTarget(Transform newTarget)
     {
         target = newTarget;
-        SyncOrbitState();
+        SyncOrbitRadius();
         TargetChanged?.Invoke(target);
     }
 
@@ -196,7 +196,7 @@ public class PlayerController : MonoBehaviour
     [Tooltip("Degrees from straight forward within which input counts as Forward (Backward " +
              "covers the rest). 90 splits the circle evenly in half — there's no separate " +
              "Strafe zone anymore, so no need to leave room for one.")]
-    [Range(10f, 90f)]
+    
     [SerializeField] private float forwardBackThreshold = 90f;
     [Tooltip("Extra angular buffer before switching category again once already in one — " +
              "prevents rapid flip-flopping between animations when input hovers near the boundary.")]
@@ -214,15 +214,21 @@ public class PlayerController : MonoBehaviour
              "smoothness dial — shorter feels snappier, longer feels floatier.")]
     [SerializeField] private float locomotionBlendSmoothTime = 0.12f;
 
-    [Tooltip("How quickly currentSpeed eases between walk and run (or from idle into either) — separate from moveAccelTime, which still governs Guard's speed easing.")]
+    [Tooltip("How quickly locomotion velocity eases toward the stick's target velocity — covers " +
+             "walk<->run, starting from idle, AND reversing direction (a forward->back flick now " +
+             "decelerates through zero instead of flipping instantly). Smoothed per-axis in the " +
+             "orbit frame, so orbiting still traces a true circle.")]
     [SerializeField] private float walkRunTransitionTime = 0.15f;
+    [Tooltip("Seconds the stick may sit inside the dead zone before locomotion counts as Idle. " +
+             "Covers the one or two frames a fast flick (up->down) spends crossing the center, " +
+             "so it reads as a reversal instead of stop -> Idle pose -> restart.")]
+    [SerializeField] private float idleInputGraceTime = 0.1f;
     [Tooltip("Seconds to accelerate/decelerate to the target move speed. This is what actually smooths " +
              "the handoff back into Locomotion after Jump/Dash/Landing — without it, movement snaps to " +
              "full speed instantly the moment there's input, no matter how smooth the state before it was.")]
     [SerializeField] private float moveAccelTime = 0.15f;
     private Vector3 velocity; // shared by Locomotion, Dash, and Jump's horizontal component — one value, no handoff needed
     private float currentSpeed;
-    private float speedVelocityRef;
 
     [Header("Jump")]
     [SerializeField] private float jumpHeight = 2f;
@@ -247,6 +253,13 @@ public class PlayerController : MonoBehaviour
     [Tooltip("Units/sec² horizontal velocity can be steered by input while airborne. 0 = fully locked " +
              "momentum (current behavior) — raise this later for characters that need real air control.")]
     [SerializeField] private float airControl = 0f;
+    private Vector2 airLocalVelocity; // jump's horizontal velocity in the orbit frame: x = right, y = toward target
+
+    private Vector3 AirLocalToWorld(Vector2 local)
+    {
+        GetLocomotionBasis(out Vector3 fwd, out Vector3 right);
+        return right * local.x + fwd * local.y;
+    }
 
     [Header("Combat Range")]
     [Tooltip("Distance from the target within which Dash becomes an orbiting side-step " +
@@ -346,6 +359,7 @@ public class PlayerController : MonoBehaviour
     private static readonly int AttackSpeedMultiplierHash = Animator.StringToHash("AttackSpeedMultiplier");
     private static readonly int LocomotionSpeedMultiplierHash = Animator.StringToHash("LocomotionSpeedMultiplier");
     private static readonly int LocomotionSpeedHash = Animator.StringToHash("LocomotionSpeed01");
+    private static readonly int MoveAmountHash = Animator.StringToHash("MoveAmount"); // Locomotion_Combat: 0 = Idle, 1 = moving (Forward/Backward picked by DirZ)
     private static readonly int JumpHash = Animator.StringToHash("Jump");
     private static readonly int DashHash = Animator.StringToHash("Dash");
     [Tooltip("Exact Animator state name for the dash animation — CrossFaded into directly " +
@@ -453,6 +467,11 @@ public class PlayerController : MonoBehaviour
 
         ClampMinDistanceToTarget();
 
+        // The one radius rule (see the orbit section): a frame that didn't move along the
+        // orbit takes the real distance as the new intended one.
+        if (!movedOnOrbitThisFrame) SyncOrbitRadius();
+        movedOnOrbitThisFrame = false;
+
         if (target != null)
         {
             debugOrbitRadius = orbitRadius;
@@ -480,7 +499,7 @@ public class PlayerController : MonoBehaviour
             correction.y = 0f;
             controller.Move(correction + Vector3.up * groundedStickForce * Time.deltaTime);
 
-            if (orbitInitialized) orbitRadius = attackRange; // keep authoritative state in sync
+            orbitRadius = attackRange; // keep the intended distance in sync
         }
     }
 
@@ -559,42 +578,120 @@ public class PlayerController : MonoBehaviour
     }
     // ---------------- Locomotion ----------------
 
-    private void TickLocomotion()
+    private void TickLocomotion() => TickGroundMovement();
+
+    /// Shared by Locomotion and RCT (identical movement rules). Order matters: category
+    /// first (decides facing), then velocity, then facing, then the blend — the blend reads
+    /// the body's actual facing vs. actual travel, so it has to come last.
+    private void TickGroundMovement()
     {
         Vector2 mv = input.MoveInput;
         bool hasInput = GetLocomotionMovement(mv, out Vector3 continuousDir, out float rawAngleDeg, out float speedBlend01, out float targetSpeed);
 
-        UpdateLocomotionAnimCategory(hasInput, rawAngleDeg, mv.magnitude); // determine category before deciding rotate direction
+        UpdateLocomotionAnimCategory(hasInput, rawAngleDeg, mv.magnitude);
+        bool moving = currentAnimCategory != LocomotionAnimCategory.Idle; // stays true through the dead-zone grace window
 
-        if (hasInput)
-        {
-            currentSpeed = Mathf.SmoothDamp(currentSpeed, targetSpeed, ref speedVelocityRef, walkRunTransitionTime);
-            velocity = continuousDir * currentSpeed; // always the current instantaneous tangent — never smoothed/lagged, which is what keeps orbiting a true circle
-
-            // Forward faces the travel direction directly — this now covers the full
-            // left/right range too, since there's no separate Strafe pose anymore; a pure
-            // sideways input just rotates a full 90° to face it, same mechanism a
-            // forward-diagonal already used. Backward faces the OPPOSITE of travel — pure
-            // straight-back is 180° from normal forward, so its opposite is 0°, meaning no
-            // rotation at all (stays facing the target, a true backpedal); a
-            // backward-diagonal's opposite is offset by exactly the diagonal amount from
-            // that baseline, which is the "twist by the diagonal angle" effect.
-            if (currentAnimCategory == LocomotionAnimCategory.Forward) RotateTowardsMovementDirection(continuousDir);
-            else RotateTowardsMovementDirection(-continuousDir); // Backward
-        }
-        else
-        {
-            // Instant stop on release — SmoothDamp toward zero would otherwise keep the
-            // character visibly sliding for ~moveAccelTime after Idle pose already shows.
-            currentSpeed = 0f;
-            speedVelocityRef = 0f;
-            velocity = Vector3.zero;
-            FaceTargetSmoothed(); // idle — resume facing the target, smoothed to avoid a snap
-        }
+        UpdateLocomotionVelocity(hasInput, rawAngleDeg, targetSpeed);
+        UpdateLocomotionFacing(hasInput, continuousDir, rawAngleDeg);
+        UpdateLocomotionBlend(hasInput, continuousDir);
 
         Move(velocity);
 
+        // During the grace window the stick reads as "no input", which would otherwise pull
+        // the walk/run blend toward walk for a few frames mid-flick.
+        if (hasInput) lastSpeedBlend01 = speedBlend01;
+        else if (moving) speedBlend01 = lastSpeedBlend01;
         animator.SetFloat(LocomotionSpeedHash, speedBlend01, dirBlendTime, Time.deltaTime);
+    }
+
+    /// Velocity is smoothed as two scalars (sideways, toward/away from the target) in the
+    /// CURRENT orbit frame and recomposed every frame. That's what makes it safe: the
+    /// earlier drift came from a world-space direction lagging behind a rotating frame;
+    /// here the frame itself is never lagged, only how fast you move along each of its
+    /// axes. Reversing (forward -> back) now decelerates through zero and accelerates back
+    /// up instead of flipping full speed in a single frame.
+    private void UpdateLocomotionVelocity(bool hasInput, float rawAngleDeg, float targetSpeed)
+    {
+        GetLocomotionBasis(out Vector3 fwd, out Vector3 right);
+
+        if (currentAnimCategory == LocomotionAnimCategory.Idle)
+        {
+            // Instant stop once really idle (grace elapsed) — avoids sliding after the Idle
+            // pose already shows. The grace window itself has already been decelerating.
+            localPlanarVelocity = Vector2.zero;
+            localPlanarVelocityRef = Vector2.zero;
+        }
+        else
+        {
+            Vector2 targetLocal = Vector2.zero; // grace window: ease toward a stop
+            if (hasInput)
+            {
+                float r = rawAngleDeg * Mathf.Deg2Rad;
+                targetLocal = new Vector2(Mathf.Sin(r), Mathf.Cos(r)) * targetSpeed; // x = right, y = toward target
+            }
+            localPlanarVelocity = Vector2.SmoothDamp(localPlanarVelocity, targetLocal, ref localPlanarVelocityRef, walkRunTransitionTime);
+        }
+
+        velocity = right * localPlanarVelocity.x + fwd * localPlanarVelocity.y;
+        currentSpeed = localPlanarVelocity.magnitude;
+    }
+
+    /// Facing is tracked as a yaw OFFSET from "facing the target" and smoothed as a plain
+    /// number, not as a world direction. Forward: offset = stick angle (face travel).
+    /// Backward: offset = stick angle ∓ 180 (face away from travel, i.e. backpedal).
+    /// Idle: 0. Crossing the Forward/Backward boundary asks for a 180° change in offset —
+    /// unavoidable, the run clip faces travel and the backpedal clip faces away from it —
+    /// but smoothing the offset linearly ALWAYS sweeps through 0, i.e. the body turns
+    /// through the target rather than picking a random side, and it can never stall the
+    /// way a SmoothDamped direction vector does when it has to shrink through zero.
+    private void UpdateLocomotionFacing(bool hasInput, Vector3 continuousDir, float rawAngleDeg)
+    {
+        if (hasInput)
+        {
+            facingTargetOffset = currentAnimCategory switch
+            {
+                LocomotionAnimCategory.Forward => rawAngleDeg,
+                LocomotionAnimCategory.Backward => rawAngleDeg - 180f * Mathf.Sign(rawAngleDeg),
+                _ => 0f
+            };
+        }
+        else if (currentAnimCategory == LocomotionAnimCategory.Idle)
+        {
+            facingTargetOffset = 0f;
+        }
+        // else: grace window — keep the last facing target; the dead-zone angle is noise.
+
+        if (TryGetFacingBase(out Vector3 baseFwd))
+        {
+            facingOffset = Mathf.SmoothDamp(facingOffset, facingTargetOffset, ref facingOffsetVelocity, rotationDirSmoothTime, movementFacingTurnSpeed);
+            transform.rotation = Quaternion.LookRotation(Quaternion.AngleAxis(facingOffset, Vector3.up) * baseFwd, Vector3.up);
+        }
+        else if (hasInput)
+        {
+            // No target: nothing to measure an offset from, just turn toward travel/away.
+            Vector3 faceDir = currentAnimCategory == LocomotionAnimCategory.Backward ? -continuousDir : continuousDir;
+            transform.rotation = Quaternion.RotateTowards(transform.rotation, Quaternion.LookRotation(faceDir, Vector3.up), movementFacingTurnSpeed * Time.deltaTime);
+        }
+    }
+
+    /// "Facing the target" reference for UpdateLocomotionFacing — the same orbit frame
+    /// movement uses, so stick angle and facing offset are measured from one baseline.
+    private bool TryGetFacingBase(out Vector3 baseFwd)
+    {
+        bool ok = TryGetOrbitDirection(out Vector3 toPlayer);
+        baseFwd = -toPlayer;
+        return ok;
+    }
+
+    /// Re-anchors facingOffset to the body's real current facing — call when entering
+    /// Locomotion from a state that rotated the character by other means (FaceTarget etc).
+    private void SyncFacingOffset()
+    {
+        facingOffsetVelocity = 0f;
+        facingOffset = TryGetFacingBase(out Vector3 baseFwd)
+            ? Vector3.SignedAngle(baseFwd, Vector3.ProjectOnPlane(transform.forward, Vector3.up), Vector3.up)
+            : 0f;
+        facingTargetOffset = facingOffset;
     }
 
     private void FaceTarget()
@@ -604,18 +701,6 @@ public class PlayerController : MonoBehaviour
         dir.y = 0f;
         if (dir.sqrMagnitude > 0.0001f)
             transform.rotation = Quaternion.LookRotation(dir.normalized);
-    }
-
-    /// Same direction as FaceTarget, but smoothed at movementFacingTurnSpeed instead of
-    /// snapping instantly — used for Locomotion/RCT's Idle case, so releasing input doesn't
-    /// produce an instant rotation snap. FaceTarget itself stays instant everywhere else
-    /// (Guard, Dash, Attacking) — this doesn't touch those.
-    private void FaceTargetSmoothed()
-    {
-        if (target == null) return;
-        Vector3 dir = target.position - transform.position;
-        dir.y = 0f;
-        if (dir.sqrMagnitude > 0.0001f) RotateTowardsMovementDirection(dir.normalized);
     }
 
     /// Buckets raw stick input into one of 4 cardinal directions (no diagonals) relative
@@ -643,14 +728,8 @@ public class PlayerController : MonoBehaviour
     /// instead of a separately-guessed convention.
     private Vector3 GetOrbitAwareFourDirection(Vector2 mv, out int snappedX, out int snappedZ)
     {
-        if (target != null && orbitInitialized)
-        {
-            Vector3 orbitForward = -orbitDirection;
-            Vector3 orbitRight = Vector3.Cross(Vector3.up, orbitForward);
-            return SnapToFourDirections(mv, orbitForward, orbitRight, out snappedX, out snappedZ);
-        }
-
-        return SnapToFourDirections(mv, out snappedX, out snappedZ);
+        GetLocomotionBasis(out Vector3 fwd, out Vector3 right);
+        return SnapToFourDirections(mv, fwd, right, out snappedX, out snappedZ);
     }
 
     /// Resolves raw stick input into: dir (snapped, for actual movement translation),
@@ -658,14 +737,13 @@ public class PlayerController : MonoBehaviour
     /// speedBlend01 (0 = walk, 1 = run, fed to whichever category state is active), and
     /// targetSpeed (walkSpeed, unaffected by Reinforcement, or moveSpeed × Reinforcement's
     /// multiplier). Shared by TickLocomotion, EnterLocomotion, and TickRCT.
-    private bool GetLocomotionMovement(Vector2 mv, out Vector3 continuousDir, out float rawAngleDeg, out float speedBlend01, out float targetSpeed)
+    /// The frame stick input is read in: fwd = toward the target along the orbit (or the
+    /// body's own forward with no target), right = 90° clockwise from it.
+    private void GetLocomotionBasis(out Vector3 fwd, out Vector3 right)
     {
-        float magnitude = mv.magnitude;
-
-        Vector3 fwd, right;
-        if (target != null && orbitInitialized)
+        if (TryGetOrbitDirection(out Vector3 toPlayer))
         {
-            fwd = -orbitDirection;
+            fwd = -toPlayer;
             right = Vector3.Cross(Vector3.up, fwd);
         }
         else
@@ -673,6 +751,13 @@ public class PlayerController : MonoBehaviour
             fwd = transform.forward;
             right = transform.right;
         }
+    }
+
+    private bool GetLocomotionMovement(Vector2 mv, out Vector3 continuousDir, out float rawAngleDeg, out float speedBlend01, out float targetSpeed)
+    {
+        float magnitude = mv.magnitude;
+
+        GetLocomotionBasis(out Vector3 fwd, out _);
 
         // Continuous (unsnapped) direction and angle — free/analog movement, used directly
         // for translation, plus character rotation, plus picking which of the 4 animation
@@ -742,40 +827,20 @@ public class PlayerController : MonoBehaviour
         return true;
     }
 
-    /// Rotates toward worldDir at movementFacingTurnSpeed — used while actively moving,
-    /// in place of FaceTarget (which resumes once movement stops).
-    private Vector3 smoothedRotationDir;
-    private Vector3 smoothedRotationDirVelocity;
-
-    private void RotateTowardsMovementDirection(Vector3 worldDir)
-    {
-        if (worldDir.sqrMagnitude < 0.0001f) return;
-
-        // Smooth the direction itself, not just the rotation speed — a jittery raw angle at
-        // low stick magnitude otherwise produces a jittery rotation TARGET every frame, and
-        // the character visibly wobbles chasing it rather than settling into a clean turn,
-        // even with movementFacingTurnSpeed capping how fast it CAN turn. This only touches
-        // transform.rotation, never position or orbitDirection, so it can't reintroduce the
-        // earlier orbital drift bug (that came from smoothing something feeding translation).
-        smoothedRotationDir = Vector3.SmoothDamp(smoothedRotationDir, worldDir, ref smoothedRotationDirVelocity, rotationDirSmoothTime);
-        if (smoothedRotationDir.sqrMagnitude < 0.0001f) return;
-
-        Quaternion targetRot = Quaternion.LookRotation(smoothedRotationDir, Vector3.up);
-        transform.rotation = Quaternion.RotateTowards(transform.rotation, targetRot, movementFacingTurnSpeed * Time.deltaTime);
-    }
-
-    /// Picks which of the 4 directional animation states (or Idle) should be active based
-    /// on the current input angle, with hysteresis to avoid rapid switching near the
-    /// forwardBackThreshold boundary, and CrossFades into it if it changed.
-
-
+    /// Picks Forward / Backward / Idle from the stick angle, with hysteresis near the
+    /// forwardBackThreshold boundary. A short dead-zone dip (idleInputGraceTime) keeps the
+    /// current category instead of dropping to Idle, so a fast flick reads as a reversal.
     private void UpdateLocomotionAnimCategory(bool hasInput, float rawAngleDeg, float magnitude)
     {
         LocomotionAnimCategory desired;
 
+        if (hasInput) idleGraceTimer = 0f;
+        else idleGraceTimer += Time.deltaTime;
+
         if (!hasInput)
         {
-            desired = LocomotionAnimCategory.Idle;
+            bool inGrace = currentAnimCategory != LocomotionAnimCategory.Idle && idleGraceTimer < idleInputGraceTime;
+            desired = inGrace ? currentAnimCategory : LocomotionAnimCategory.Idle;
         }
         else
         {
@@ -797,20 +862,41 @@ public class PlayerController : MonoBehaviour
         }
 
         currentAnimCategory = desired;
+    }
 
-        // The blend tree only ever gets pulled toward one of these fixed points — never the
-        // raw stick angle — so it can't linger blending at an arbitrary diagonal. SmoothDamp
-        // glides it between points on a category change instead of jumping instantly.
-        Vector2 targetPoint = desired switch
+    /// Drives Locomotion_Combat: MoveAmount (0 Idle, 1 moving) and DirZ (+1 run, -1
+    /// backpedal). Idle sits on its own axis now, so Forward <-> Backward blends the two
+    /// clips directly instead of passing through the Idle pose halfway.
+    ///
+    /// DirZ comes from how the body ACTUALLY faces relative to how it ACTUALLY travels,
+    /// not from the category: during the 180° turn at the boundary the legs crossfade in
+    /// step with the body, and during a reversal they switch as velocity crosses zero
+    /// rather than while the character is still sliding the old way. In steady state
+    /// facing is exactly along/against travel, so this settles on exactly +1 / -1 — the
+    /// ×2 just keeps small turn lag from mixing in any of the other clip.
+    private void UpdateLocomotionBlend(bool hasInput, Vector3 inputDir)
+    {
+        bool moving = currentAnimCategory != LocomotionAnimCategory.Idle;
+        float targetMoveAmount = moving ? 1f : 0f;
+        float targetDirZ = dirZBlend; // idle: hold, so starting to move again doesn't pop
+
+        if (moving)
         {
-            LocomotionAnimCategory.Forward => new Vector2(0f, 1f),
-            LocomotionAnimCategory.Backward => new Vector2(0f, -1f),
-            _ => Vector2.zero // Idle
-        };
+            // Actual travel once there's real speed; while nearly stopped (just starting, or
+            // at the bottom of a reversal) actual direction is meaningless, so use the stick.
+            Vector3 planar = Vector3.ProjectOnPlane(velocity, Vector3.up);
+            const float minSpeedForDirection = 0.5f;
+            Vector3 travel = planar.sqrMagnitude >= minSpeedForDirection * minSpeedForDirection ? planar.normalized
+                           : hasInput ? inputDir
+                           : Vector3.zero; // grace window and nearly stopped: hold below
+            if (travel != Vector3.zero)
+                targetDirZ = Mathf.Clamp(Vector3.Dot(transform.forward, travel) * 2f, -1f, 1f);
+        }
 
-        locomotionBlendInput = Vector2.SmoothDamp(locomotionBlendInput, targetPoint, ref locomotionBlendVelocity, locomotionBlendSmoothTime);
-        animator.SetFloat(DirXHash, locomotionBlendInput.x);
-        animator.SetFloat(DirZHash, locomotionBlendInput.y);
+        moveAmountBlend = Mathf.SmoothDamp(moveAmountBlend, targetMoveAmount, ref moveAmountBlendVelocity, locomotionBlendSmoothTime);
+        dirZBlend = Mathf.SmoothDamp(dirZBlend, targetDirZ, ref dirZBlendVelocity, locomotionBlendSmoothTime);
+        animator.SetFloat(MoveAmountHash, moveAmountBlend);
+        animator.SetFloat(DirZHash, dirZBlend);
     }
     // ---------------- Jump ----------------
 
@@ -843,21 +929,22 @@ public class PlayerController : MonoBehaviour
 
     private void DoJump()
     {
-        // Dash's fixed-distance and straight-line branches (unlike the orbital one) move the
-        // character with raw controller.Move(), never touching orbitDirection/orbitRadius —
-        // and jumping can interrupt a dash directly (fromDashInterrupt in OnJumpPressed),
-        // skipping EndDash/EnterLocomotion, which is normally what resyncs this. Without
-        // this, GetOrbitAwareFourDirection below and every subsequent frame's
-        // ApplyOrbitalCorrection in TickJump would use stale, pre-dash orbit data — the
-        // same root cause as the earlier Landing teleport-back bug, just reached via a
-        // different interrupt path this time.
-        SyncOrbitState();
-
         RecalculateJumpPhysics(); // pick up any runtime inspector tweaks before this jump
         verticalVelocity = jumpVelocity;
 
-        Vector3 dir = GetOrbitAwareFourDirection(input.MoveInput, out int snappedX, out int snappedZ);
-        velocity = dir.normalized * airHorizontalSpeed * AirSpeedMultiplier;
+        // Launch direction: 4-way snapped to match the directional jump clips, but only past
+        // the same dead zone Locomotion uses — a resting/drifting stick is a neutral jump,
+        // not a full-speed jump in whichever cardinal the noise happened to point at.
+        int snappedX = 0, snappedZ = 0;
+        Vector2 mv = input.MoveInput;
+        if (mv.magnitude >= walkThreshold)
+        {
+            float snappedAngle = Mathf.Round(Mathf.Atan2(mv.x, mv.y) * Mathf.Rad2Deg / 90f) * 90f * Mathf.Deg2Rad;
+            snappedX = Mathf.RoundToInt(Mathf.Sin(snappedAngle));
+            snappedZ = Mathf.RoundToInt(Mathf.Cos(snappedAngle));
+        }
+        airLocalVelocity = new Vector2(snappedX, snappedZ) * airHorizontalSpeed * AirSpeedMultiplier;
+        velocity = AirLocalToWorld(airLocalVelocity);
         animator.SetFloat(DirXHash, snappedX);
         animator.SetFloat(DirZHash, snappedZ);
 
@@ -872,15 +959,29 @@ public class PlayerController : MonoBehaviour
     {
         FaceTarget(); // same reasoning as Dash — capped turn speed prevents mismatch, so no need to freeze this
 
+        // Air velocity lives in the orbit frame (x = right, y = toward target), same as
+        // Locomotion: a side jump arcs around the target instead of flying off along a
+        // fixed world line while the body keeps turning to face the target.
+        //
+        // Steering is continuous and magnitude-scaled, past the dead zone only. Releasing
+        // the stick keeps the committed momentum. The old version re-snapped the raw stick
+        // to 4 directions every frame with no dead zone, so while the stick was springing
+        // back to center (and any drift after) the steering target jumped between
+        // full-speed cardinals frame to frame — that's the mid-air jitter.
         if (airControl > 0f)
         {
-            Vector3 dir = GetOrbitAwareFourDirection(input.MoveInput, out _, out _);
-            Vector3 targetAirVelocity = dir.normalized * airHorizontalSpeed * AirSpeedMultiplier;
-            velocity = Vector3.MoveTowards(velocity, targetAirVelocity, airControl * Time.deltaTime);
+            Vector2 mv = input.MoveInput;
+            float magnitude = mv.magnitude;
+            if (magnitude >= walkThreshold)
+            {
+                Vector2 targetLocal = (mv / magnitude) * Mathf.Clamp01(magnitude) * airHorizontalSpeed * AirSpeedMultiplier;
+                airLocalVelocity = Vector2.MoveTowards(airLocalVelocity, targetLocal, airControl * Time.deltaTime);
+            }
         }
+        velocity = AirLocalToWorld(airLocalVelocity);
 
         verticalVelocity += (verticalVelocity > 0f ? gravityUp : gravityDown) * Time.deltaTime;
-        Vector3 horizontalDisplacement = ApplyOrbitalCorrection(velocity * Time.deltaTime);
+        Vector3 horizontalDisplacement = OrbitStep(velocity * Time.deltaTime);
         Vector3 verticalDisplacement = Vector3.up * verticalVelocity * Time.deltaTime;
         controller.Move(horizontalDisplacement + verticalDisplacement);
 
@@ -908,46 +1009,62 @@ public class PlayerController : MonoBehaviour
         action = ActionState.Locomotion;
         if (crossfade && !string.IsNullOrEmpty(locomotionStateName))
             animator.CrossFadeInFixedTime(locomotionStateName, locomotionCrossfadeDuration);
-        // Synchronous, not deferred — a prior attempt to defer this to the end of Update()
-        // caused a worse bug: action flips to Locomotion immediately (synchronous event),
-        // so THIS frame's switch statement already routes to TickLocomotion before a
-        // deferred sync ever got a chance to run, leaving it to use stale orbit data for
-        // one frame and produce a visible snap. Syncing here immediately avoids that. The
-        // original concern (reading position mid-forward-step) isn't a real risk in
-        // practice — the step always finishes many frames before the clip does.
-        SyncOrbitState();
-
-        // Resync to whatever DirX/DirZ actually are right now — Dash (and Jump) set them
+        // Resync to whatever DirZ/MoveAmount actually are right now — Dash (and Jump) set DirZ
         // directly and instantly, completely bypassing this tracking variable, which
         // otherwise stays frozen at whatever it was before the interrupting state began.
         // Starting the smoothing from that stale value instead of the true current pose is
         // what caused the pop: small/invisible if the stale value happened to be close to
         // the dash direction, large and visible if they'd diverged (e.g. was idle, then
         // dashed a totally different direction).
-        locomotionBlendInput = new Vector2(animator.GetFloat(DirXHash), animator.GetFloat(DirZHash));
+        dirZBlend = animator.GetFloat(DirZHash);
+        dirZBlendVelocity = 0f;
+        moveAmountBlend = animator.GetFloat(MoveAmountHash);
+        moveAmountBlendVelocity = 0f;
 
-        // Same fix, same reason, for rotation: smoothedRotationDir is frozen during Dash
-        // (nothing calls RotateTowardsMovementDirection/FaceTargetSmoothed while dashing),
-        // so it's still holding whatever direction it was tracking before the dash even
-        // started. Resync it to the character's actual current facing so the post-dash
-        // blend starts from reality instead of a stale pre-dash value.
-        smoothedRotationDir = transform.forward;
-        smoothedRotationDirVelocity = Vector3.zero;
+        // Same fix, same reason, for rotation: Dash/Jump/Guard/Attack rotate the body with
+        // FaceTarget, bypassing facingOffset — re-anchor it to the body's real facing so
+        // the first Locomotion frame turns from reality instead of a stale value.
+        SyncFacingOffset();
+
+        // Carry whatever horizontal velocity we arrived with (e.g. landing from a jump) into
+        // the smoothed per-axis velocity, so the handoff eases instead of snapping.
+        GetLocomotionBasis(out Vector3 fwd, out Vector3 right);
+        localPlanarVelocity = new Vector2(Vector3.Dot(velocity, right), Vector3.Dot(velocity, fwd));
+        localPlanarVelocityRef = Vector2.zero;
+
+        // The dead-zone grace window is only for a flick DURING continuous locomotion. Across
+        // a state change, currentAnimCategory is stale (e.g. still "running" from before a
+        // jump), so letting grace apply here kept the character moving for up to
+        // idleInputGraceTime with the carried-over air velocity, then stopped it dead: the
+        // slide/jitter after landing. Expire it so no input here means Idle right away.
+        idleGraceTimer = idleInputGraceTime;
 
         bool hasInput = GetLocomotionMovement(input.MoveInput, out _, out float rawAngleDeg, out float speedBlend01, out _);
         UpdateLocomotionAnimCategory(hasInput, rawAngleDeg, input.MoveInput.magnitude);
+        if (hasInput) lastSpeedBlend01 = speedBlend01;
+        else localPlanarVelocity = Vector2.zero; // nothing to carry into a standstill
+
+        // MoveAmount is only read by Locomotion_Combat, and that state isn't on screen yet
+        // (we're coming from Land/Dash/Guard/etc. and the Animator is crossfading in), so
+        // there's nothing to smooth — easing it from its stale pre-jump value made the
+        // legs run in place for a moment after a no-input landing. Snap it to the truth.
+        // (DirZ is NOT snapped: the outgoing Dash/Jump trees read it too, and changing it
+        // under them is what the resync above exists to avoid.)
+        moveAmountBlend = currentAnimCategory == LocomotionAnimCategory.Idle ? 0f : 1f;
+        animator.SetFloat(MoveAmountHash, moveAmountBlend);
         animator.SetFloat(LocomotionSpeedHash, speedBlend01, dirBlendTime, Time.deltaTime);
     }
 
     private void TickLanding()
     {
-        // Movement input cuts the recovery short instantly — the ANIMATION still transitions
-        // via the native Land -> Locomotion_Combat graph transition (its own set duration),
-        // not a code-forced crossfade. Code-level state (action, movement) switches to
-        // Locomotion right away either way.
-        if (input.MoveInput.sqrMagnitude > 0.01f)
+        // Movement input cuts the recovery short instantly. This path skips Landing=true
+        // entirely, so the Animator never enters Land — and Jump rise's only other way back
+        // is "Grounded && DirZ > 0.4", which a backpedal (DirZ ≈ -1) never satisfies,
+        // leaving the jump pose stuck on while moving. Crossfade from code instead of
+        // relying on that. The no-input path below still uses the native Land transition.
+        if (input.MoveInput.magnitude >= walkThreshold)
         {
-            EnterLocomotion(crossfade: false);
+            EnterLocomotion(crossfade: true);
             dashLockoutTimer = dashLockoutAfterLanding;
             return;
         }
@@ -1016,10 +1133,6 @@ public class PlayerController : MonoBehaviour
         Vector3 dashDir;
         bool nearTarget = IsInCombatRange();
 
-        // Resync before anything reads orbitDirection — state may be stale from before a
-        // jump/landing that interrupted straight into this dash.
-        if (nearTarget && target != null) SyncOrbitState();
-
         dashDir = GetOrbitAwareFourDirection(aimInput, out snappedX, out snappedZ);
 
         animator.SetFloat(DirXHash, snappedX);
@@ -1040,10 +1153,10 @@ public class PlayerController : MonoBehaviour
 
         if (dashIsOrbital)
         {
-            // Sign determined by checking which way this direction actually rotates
-            // orbitDirection — reuses the same convention OrbitalDisplacement already uses
-            // and Locomotion already verified correct, instead of guessing independently.
-            Vector3 tangentDir = Vector3.Cross(Vector3.up, orbitDirection);
+            // Sign determined by checking which way this direction actually rotates around
+            // the target — same convention OrbitStep uses, instead of guessing independently.
+            TryGetOrbitDirection(out Vector3 toPlayer);
+            Vector3 tangentDir = Vector3.Cross(Vector3.up, toPlayer);
             float sign = Mathf.Sign(Vector3.Dot(dashDir, tangentDir));
             float radius = Mathf.Max(orbitRadius, 0.01f);
 
@@ -1109,12 +1222,10 @@ public class PlayerController : MonoBehaviour
             if (Mathf.Abs(step) > Mathf.Abs(dashOrbitAngleRemaining))
                 step = dashOrbitAngleRemaining; // don't overshoot past the configured angle, in either mode
 
-            orbitDirection = (Quaternion.AngleAxis(step, Vector3.up) * orbitDirection).normalized;
             dashOrbitAngleRemaining -= step;
 
-            Vector3 desiredPosition = target.position + orbitDirection * orbitRadius;
-            Vector3 correction = desiredPosition - transform.position;
-            correction.y = 0f;
+            TryGetOrbitDirection(out Vector3 toPlayer);
+            Vector3 correction = OrbitCorrection(Quaternion.AngleAxis(step, Vector3.up) * toPlayer);
             controller.Move(correction + Vector3.up * groundedStickForce * Time.deltaTime);
             bool doneAngle = Mathf.Abs(dashOrbitAngleRemaining) <= 0.05f;
             bool doneSpeed = Mathf.Abs(dashOrbitAngularSpeed) <= 0.5f;
@@ -1206,7 +1317,6 @@ public class PlayerController : MonoBehaviour
         action = ActionState.Guarding;
         velocity = Vector3.zero;
         currentSpeed = 0f;
-        speedVelocityRef = 0f;
         lastGuardPressTime = Time.time;
         animator.SetBool(GuardHash, true);
     }
@@ -1227,7 +1337,6 @@ public class PlayerController : MonoBehaviour
         // so nothing about that changes here.
         velocity = Vector3.zero;
         currentSpeed = 0f;
-        speedVelocityRef = 0f;
         Move(velocity);
     }
     // ---------------- Reverse Cursed Technique ----------------
@@ -1247,33 +1356,7 @@ public class PlayerController : MonoBehaviour
         }
     }
 
-    private void TickRCT()
-    {
-        Vector2 mv = input.MoveInput;
-        bool hasInput = GetLocomotionMovement(mv, out Vector3 continuousDir, out float rawAngleDeg, out float speedBlend01, out float targetSpeed);
-
-        UpdateLocomotionAnimCategory(hasInput, rawAngleDeg, mv.magnitude);
-
-        if (hasInput)
-        {
-            currentSpeed = Mathf.SmoothDamp(currentSpeed, targetSpeed, ref speedVelocityRef, walkRunTransitionTime);
-            velocity = continuousDir * currentSpeed;
-
-            if (currentAnimCategory == LocomotionAnimCategory.Forward) RotateTowardsMovementDirection(continuousDir);
-            else RotateTowardsMovementDirection(-continuousDir); // Backward
-        }
-        else
-        {
-            currentSpeed = 0f;
-            speedVelocityRef = 0f;
-            velocity = Vector3.zero;
-            FaceTargetSmoothed(); // idle
-        }
-
-        Move(velocity);
-
-        animator.SetFloat(LocomotionSpeedHash, speedBlend01, dirBlendTime, Time.deltaTime);
-    }
+    private void TickRCT() => TickGroundMovement(); // same movement rules as Locomotion
 
     // ---------------- Combat ----------------
 
@@ -1371,71 +1454,80 @@ public class PlayerController : MonoBehaviour
     }
     // ---------------- Helpers ----------------
 
-    // Authoritative orbit state — evolved purely through rotation, never re-derived from
-    // transform.position each frame. This is what actually fixes the drift: rotating a
-    // vector is mathematically exact (never changes its length), while re-reading position
-    // after CharacterController.Move() inherits whatever small collision-sweep imprecision
-    // happened that frame, and that error was compounding frame over frame.
-    private Vector3 orbitDirection = Vector3.forward; // world-space, points from target toward player
+    // ---- Orbit movement ----
+    // The only stored orbit state is the INTENDED distance to the target. Direction is
+    // always read fresh from the real position, so it can never go stale and nothing has
+    // to re-sync it. Drift was a radius problem (re-reading distance after Move() let
+    // collision-sweep error compound), so keeping just the radius authoritative is enough
+    // to stop it: the angle around the target has nothing to drift toward or away from.
+    //
+    // Radius rule, in one place (end of Update): any frame that didn't move along the
+    // orbit (straight dash, attack step, knockback, guard, landing...) re-reads the radius
+    // from the real distance. Orbital frames (Locomotion, RCT, Jump, side dash) keep it,
+    // so they change it only through deliberate toward/away movement.
     private float orbitRadius;
-    private bool orbitInitialized;
+    private bool movedOnOrbitThisFrame;
+
     private enum LocomotionAnimCategory { Idle, Forward, Backward }
     private LocomotionAnimCategory currentAnimCategory = LocomotionAnimCategory.Idle;
-    private Vector2 locomotionBlendInput; // smoothly damped toward whichever category's fixed point is current — never sits at an arbitrary diagonal
-    private Vector2 locomotionBlendVelocity;
+    private float idleGraceTimer;            // time the stick has been in the dead zone
+    private float lastSpeedBlend01;          // walk/run value held through the grace window
+    private Vector2 localPlanarVelocity;     // x = right, y = toward target, in the current orbit frame
+    private Vector2 localPlanarVelocityRef;
+    private float facingOffset;              // smoothed yaw offset from facing the target (degrees)
+    private float facingOffsetVelocity;
+    private float facingTargetOffset;
+    private float moveAmountBlend, moveAmountBlendVelocity; // Animator MoveAmount
+    private float dirZBlend, dirZBlendVelocity;             // Animator DirZ while in Locomotion
 
-    /// Re-anchors the orbit state from the actual current position. Call this at any point
-    /// where the character may have moved in a way this system didn't track (entering
-    /// Locomotion from Dash/Jump/Landing/Guard/RCT) — NOT every frame, since that would
-    /// reintroduce the exact drift this system exists to prevent.
-    private void SyncOrbitState()
+    /// Flat direction from the target to the player, read from the real positions.
+    private bool TryGetOrbitDirection(out Vector3 dir)
+    {
+        dir = Vector3.forward;
+        if (target == null) return false;
+        Vector3 toPlayer = transform.position - target.position;
+        toPlayer.y = 0f;
+        if (toPlayer.sqrMagnitude < 0.0001f) return false;
+        dir = toPlayer.normalized;
+        return true;
+    }
+
+    private void SyncOrbitRadius()
     {
         if (target == null) return;
         Vector3 toPlayer = transform.position - target.position;
         toPlayer.y = 0f;
         orbitRadius = toPlayer.magnitude;
-        orbitDirection = orbitRadius > 0.0001f ? toPlayer.normalized : transform.forward;
-        orbitInitialized = true;
-    }
-
-    /// Applies orbital correction to a horizontal displacement if a target exists — shared
-    /// by Move() (which adds groundedStickForce on top, appropriate while grounded) and
-    /// TickJump (which handles its own vertical velocity from gravity/jump physics instead).
-    private Vector3 ApplyOrbitalCorrection(Vector3 horizontalDisplacement)
-    {
-        if (target == null) return horizontalDisplacement;
-        if (!orbitInitialized) SyncOrbitState();
-        return OrbitalDisplacement(horizontalDisplacement);
     }
 
     private void Move(Vector3 horizontal)
     {
-        Vector3 displacement = ApplyOrbitalCorrection(horizontal * Time.deltaTime);
+        Vector3 displacement = OrbitStep(horizontal * Time.deltaTime);
         controller.Move(displacement + Vector3.up * groundedStickForce * Time.deltaTime);
     }
 
-    /// Given a desired horizontal displacement for this frame, evolves the authoritative
-    /// orbitDirection/orbitRadius (radial input changes radius directly; tangential input
-    /// rotates orbitDirection by a real angular step — arc length divided by radius) and
-    /// returns the displacement needed to move the actual character toward that state.
-    private Vector3 OrbitalDisplacement(Vector3 desiredDisplacement)
+    /// Turns a desired horizontal displacement into movement around the target: the
+    /// toward/away part changes the intended radius, the sideways part becomes an arc
+    /// (arc length / radius = angle). Returns the displacement that puts the character
+    /// there. No target → the displacement passes through unchanged.
+    private Vector3 OrbitStep(Vector3 desiredDisplacement)
     {
-        Vector3 radialDir = orbitDirection;
+        if (!TryGetOrbitDirection(out Vector3 radialDir)) return desiredDisplacement;
+        if (orbitRadius <= 0f) SyncOrbitRadius(); // first use
+
         Vector3 tangentDir = Vector3.Cross(Vector3.up, radialDir);
+        orbitRadius = Mathf.Max(0.01f, orbitRadius + Vector3.Dot(desiredDisplacement, radialDir));
+        float angleDeg = Vector3.Dot(desiredDisplacement, tangentDir) / orbitRadius * Mathf.Rad2Deg;
 
-        float radialAmount = Vector3.Dot(desiredDisplacement, radialDir);
-        float tangentAmount = Vector3.Dot(desiredDisplacement, tangentDir);
+        return OrbitCorrection(Quaternion.AngleAxis(angleDeg, Vector3.up) * radialDir);
+    }
 
-        orbitRadius = Mathf.Max(0.01f, orbitRadius + radialAmount);
-
-        if (Mathf.Abs(tangentAmount) > 0.0001f)
-        {
-            float angularStep = (tangentAmount / orbitRadius) * Mathf.Rad2Deg;
-            orbitDirection = (Quaternion.AngleAxis(angularStep, Vector3.up) * orbitDirection).normalized;
-        }
-
-        Vector3 desiredPosition = target.position + orbitDirection * orbitRadius;
-        Vector3 correction = desiredPosition - transform.position;
+    /// Displacement that moves the character to newDir at the intended radius. Shared by
+    /// OrbitStep and the side dash (which rotates by an angle directly).
+    private Vector3 OrbitCorrection(Vector3 newDir)
+    {
+        movedOnOrbitThisFrame = true;
+        Vector3 correction = target.position + newDir * orbitRadius - transform.position;
         correction.y = 0f;
         return correction;
     }
