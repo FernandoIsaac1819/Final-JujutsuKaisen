@@ -1,8 +1,9 @@
 using System;
 using UnityEngine;
 
-/// Locked-on player movement: locomotion around the target, jump, dash, guard, plus the
-/// movement side of RCT, attacks and hitstun. Tuning lives in a PlayerSettings asset.
+/// Locked-on player: locomotion around the target, jump, dash, guard, plus the movement
+/// side of RCT, attacks and hitstun. Tuning lives in a PlayerSettings asset; moving the
+/// CharacterController is PlayerMotor's job and lock-on is PlayerTargeting's.
 /// Requires CharacterController + Animator. No root motion.
 [RequireComponent(typeof(CharacterController))]
 [RequireComponent(typeof(Animator))]
@@ -14,7 +15,7 @@ public class PlayerController : MonoBehaviour
     [Header("Refs")]
     [SerializeField] private InputReader input;
     [SerializeField] private PlayerSettings settings;
-    [Tooltip("Optional. If set, the player orbits and faces it.")]
+    [Tooltip("Optional starting target. Lock-on replaces it with the nearest TargetGroup's Primary.")]
     [SerializeField] private Transform target;
     [Tooltip("Optional. If null, stats use base values.")]
     [SerializeField] private Reinforcement reinforcement;
@@ -37,7 +38,7 @@ public class PlayerController : MonoBehaviour
     // ---- Public API ----
 
     public event Action<Transform> TargetChanged;
-    public Transform Target => target;
+    public Transform Target => targeting != null ? targeting.Target : target;
     public bool CanUseRCT => action == ActionState.Locomotion;
     public bool CanAttack => action == ActionState.Locomotion ||
         (action == ActionState.Dashing && DashProgress01 >= Dash.attackCancelWindow);
@@ -45,7 +46,7 @@ public class PlayerController : MonoBehaviour
     public float GuardDamageReduction => Combat.guardDamageReduction;
     /// Hook for a future Sidestep system.
     public bool IsVulnerableToSidestep => action == ActionState.Locomotion;
-    public bool IsInCombatRange() => target != null && Vector3.Distance(transform.position, target.position) <= Combat.combatRange;
+    public bool IsInCombatRange() => Target != null && Vector3.Distance(transform.position, Target.position) <= Combat.combatRange;
 
     // ---- Settings shortcuts ----
 
@@ -77,8 +78,9 @@ public class PlayerController : MonoBehaviour
 
     // ---- Runtime state ----
 
-    private CharacterController controller;
     private Animator animator;
+    private PlayerMotor motor;
+    private PlayerTargeting targeting;
     private ActionState action = ActionState.Locomotion;
     private Vector3 velocity; // horizontal; shared by every state
 
@@ -86,7 +88,6 @@ public class PlayerController : MonoBehaviour
 
     private void Awake()
     {
-        controller = GetComponent<CharacterController>();
         animator = GetComponent<Animator>();
 
         if (settings == null)
@@ -95,6 +96,10 @@ public class PlayerController : MonoBehaviour
             enabled = false;
             return;
         }
+
+        targeting = new PlayerTargeting(input, transform, target);
+        motor = new PlayerMotor(GetComponent<CharacterController>(), settings, () => targeting.Target);
+        targeting.Changed += OnTargetChanged;
 
         RecalculateJumpPhysics();
         animator.SetFloat(AttackSpeedMultiplierHash, Combat.attackAnimSpeed);
@@ -119,7 +124,7 @@ public class PlayerController : MonoBehaviour
         if (reinforcement != null) reinforcement.TierChanged += OnReinforcementTierChanged;
         animator.SetFloat(AttackSpeedMultiplierHash, Combat.attackAnimSpeed);
 
-        EngageLockOn(); // always locked on
+        targeting.Engage(); // always locked on
     }
 
     private void OnDisable()
@@ -133,6 +138,14 @@ public class PlayerController : MonoBehaviour
         if (reinforcement != null) reinforcement.TierChanged -= OnReinforcementTierChanged;
     }
 
+    /// New target: take its distance as the intended orbit radius, then tell listeners
+    /// (camera rigs keep their own reference to the enemy).
+    private void OnTargetChanged(Transform newTarget)
+    {
+        motor.SyncOrbitRadius();
+        TargetChanged?.Invoke(newTarget);
+    }
+
     /// Attack anim speed follows Reinforcement's tier. TierChanged already fires when the
     /// stats apply, so this stays in sync with movement speed.
     private void OnReinforcementTierChanged(Reinforcement.Tier tier)
@@ -144,7 +157,7 @@ public class PlayerController : MonoBehaviour
     private void Update()
     {
         TickTimers();
-        if (target != null) TickTargetSwitch();
+        targeting.Tick();
 
         // A dash pressed during cooldown fires the moment cooldown clears.
         if (dashBufferTimer > 0f && dashCooldownTimer <= 0f && action == ActionState.Locomotion && dashLockoutTimer <= 0f)
@@ -166,20 +179,15 @@ public class PlayerController : MonoBehaviour
             case ActionState.Dashing: TickDash(); break;
         }
 
-        ClampMinDistanceToTarget();
+        motor.EndFrame();
 
-        // Radius rule: a frame that didn't move along the orbit takes the real distance
-        // as the new intended one (see Orbit section).
-        if (!movedOnOrbitThisFrame) SyncOrbitRadius();
-        movedOnOrbitThisFrame = false;
-
-        if (target != null)
+        if (Target != null)
         {
-            debugOrbitRadius = orbitRadius;
-            debugActualDistance = Vector3.Distance(transform.position, target.position);
+            debugOrbitRadius = motor.OrbitRadius;
+            debugActualDistance = Vector3.Distance(transform.position, Target.position);
         }
 
-        animator.SetBool(GroundedHash, controller.isGrounded);
+        animator.SetBool(GroundedHash, motor.IsGrounded);
         animator.SetBool(LandingHash, action == ActionState.Landing);
     }
 
@@ -192,92 +200,7 @@ public class PlayerController : MonoBehaviour
         if (dashCooldownTimer > 0f) dashCooldownTimer -= dt;
         if (dashLockoutTimer > 0f) dashLockoutTimer -= dt;
         if (dashBufferTimer > 0f) dashBufferTimer -= dt;
-        airborneTimer = controller.isGrounded ? 0f : airborneTimer + dt;
-    }
-
-    // ================================================================ Targeting
-
-    private TargetGroup activeGroup;
-    private float prevLookX;
-    private float targetSwitchCooldownTimer;
-
-    /// Locks onto the nearest TargetGroup's Primary. Safe to call again.
-    private void EngageLockOn()
-    {
-        if (activeGroup == null) activeGroup = FindNearestTargetGroup();
-        if (activeGroup != null) SetTarget(activeGroup.Primary);
-        Debug.Log($"[LockOn] Engaged, target='{target?.name}'");
-    }
-
-    private TargetGroup FindNearestTargetGroup()
-    {
-        TargetGroup nearest = null;
-        float nearestDistSqr = float.MaxValue;
-        foreach (TargetGroup group in FindObjectsByType<TargetGroup>(FindObjectsSortMode.None))
-        {
-            float distSqr = (group.Primary.position - transform.position).sqrMagnitude;
-            if (distSqr < nearestDistSqr)
-            {
-                nearestDistSqr = distSqr;
-                nearest = group;
-            }
-        }
-        return nearest;
-    }
-
-    /// Takes the new target's distance as the intended orbit radius, then notifies listeners
-    /// (camera rigs keep their own reference to the enemy).
-    private void SetTarget(Transform newTarget)
-    {
-        target = newTarget;
-        SyncOrbitRadius();
-        TargetChanged?.Invoke(target);
-    }
-
-    /// Right-stick flick switches target. Fires on the edge (crossing the threshold), not
-    /// while held. Threshold and cooldown come from the TargetGroup.
-    private void TickTargetSwitch()
-    {
-        if (activeGroup == null)
-        {
-            Debug.Log($"[LockOn] No TargetGroup found; flick switching disabled. Frame {Time.frameCount}");
-            return;
-        }
-        if (targetSwitchCooldownTimer > 0f) targetSwitchCooldownTimer -= Time.deltaTime;
-
-        float lookX = input.LookInput.x;
-        bool wasBelow = Mathf.Abs(prevLookX) < activeGroup.FlickThreshold;
-        bool isAbove = Mathf.Abs(lookX) >= activeGroup.FlickThreshold;
-
-        if (Mathf.Abs(lookX) > 0.05f)
-            Debug.Log($"[LockOn] lookX={lookX:F3}, threshold={activeGroup.FlickThreshold:F2}, wasBelow={wasBelow}, isAbove={isAbove}, cooldown={targetSwitchCooldownTimer:F2}");
-
-        if (wasBelow && isAbove && targetSwitchCooldownTimer <= 0f)
-        {
-            int direction = lookX > 0f ? 1 : -1;
-            Transform next = activeGroup.GetTargetInDirection(transform.position, transform.right, target, direction);
-            if (next != null)
-            {
-                SetTarget(next);
-                Debug.Log($"[LockOn] Switched target to '{target.name}' (flick {(direction > 0 ? "right" : "left")})");
-            }
-            else
-            {
-                Debug.Log($"[LockOn] Flick {(direction > 0 ? "right" : "left")} found no target; check the TargetGroup's Secondaries.");
-            }
-            targetSwitchCooldownTimer = activeGroup.FlickCooldown;
-        }
-
-        prevLookX = lookX;
-    }
-
-    private void FaceTarget()
-    {
-        if (target == null) return;
-        Vector3 dir = target.position - transform.position;
-        dir.y = 0f;
-        if (dir.sqrMagnitude > 0.0001f)
-            transform.rotation = Quaternion.LookRotation(dir.normalized);
+        airborneTimer = motor.IsGrounded ? 0f : airborneTimer + dt;
     }
 
     // ================================================================ Locomotion (also RCT)
@@ -309,7 +232,7 @@ public class PlayerController : MonoBehaviour
         UpdateLocomotionFacing(hasInput, continuousDir, rawAngleDeg);
         UpdateLocomotionBlend(hasInput, continuousDir);
 
-        Move(velocity);
+        motor.Move(velocity);
 
         // Hold walk/run through the grace window instead of easing toward walk mid-flick.
         if (hasInput) lastSpeedBlend01 = speedBlend01;
@@ -323,7 +246,7 @@ public class PlayerController : MonoBehaviour
     private bool GetLocomotionMovement(Vector2 mv, out Vector3 continuousDir, out float rawAngleDeg, out float speedBlend01, out float targetSpeed)
     {
         float magnitude = mv.magnitude;
-        GetLocomotionBasis(out Vector3 fwd, out _);
+        motor.GetBasis(out Vector3 fwd, out _);
 
         if (magnitude < 0.0001f)
         {
@@ -408,8 +331,6 @@ public class PlayerController : MonoBehaviour
     /// slow through zero.
     private void UpdateLocomotionVelocity(bool hasInput, float rawAngleDeg, float targetSpeed)
     {
-        GetLocomotionBasis(out Vector3 fwd, out Vector3 right);
-
         if (currentAnimCategory == LocomotionAnimCategory.Idle)
         {
             // Instant stop once really idle, so there's no slide under the Idle pose.
@@ -427,7 +348,7 @@ public class PlayerController : MonoBehaviour
             localPlanarVelocity = Vector2.SmoothDamp(localPlanarVelocity, targetLocal, ref localPlanarVelocityRef, Loco.velocitySmoothTime);
         }
 
-        velocity = right * localPlanarVelocity.x + fwd * localPlanarVelocity.y;
+        velocity = motor.LocalToWorld(localPlanarVelocity);
     }
 
     /// Facing is a yaw offset from facing the target, smoothed as a number. Forward faces
@@ -451,10 +372,10 @@ public class PlayerController : MonoBehaviour
         }
         // else: grace window, keep the last target (the dead-zone angle is noise).
 
-        if (TryGetFacingBase(out Vector3 baseFwd))
+        if (motor.TryGetOrbitDirection(out Vector3 toPlayer))
         {
             facingOffset = Mathf.SmoothDamp(facingOffset, facingTargetOffset, ref facingOffsetVelocity, Facing.smoothTime, Facing.turnSpeed);
-            transform.rotation = Quaternion.LookRotation(Quaternion.AngleAxis(facingOffset, Vector3.up) * baseFwd, Vector3.up);
+            transform.rotation = Quaternion.LookRotation(Quaternion.AngleAxis(facingOffset, Vector3.up) * -toPlayer, Vector3.up);
         }
         else if (hasInput)
         {
@@ -506,8 +427,7 @@ public class PlayerController : MonoBehaviour
         SyncFacingOffset();
 
         // Carry the arriving velocity so the handoff eases instead of snapping.
-        GetLocomotionBasis(out Vector3 fwd, out Vector3 right);
-        localPlanarVelocity = new Vector2(Vector3.Dot(velocity, right), Vector3.Dot(velocity, fwd));
+        localPlanarVelocity = motor.WorldToLocal(velocity);
         localPlanarVelocityRef = Vector2.zero;
 
         // Grace only applies within continuous locomotion; the category is stale here.
@@ -525,18 +445,11 @@ public class PlayerController : MonoBehaviour
         animator.SetFloat(LocomotionSpeedHash, speedBlend01, Loco.walkRunBlendDamp, Time.deltaTime);
     }
 
-    private bool TryGetFacingBase(out Vector3 baseFwd)
-    {
-        bool ok = TryGetOrbitDirection(out Vector3 toPlayer);
-        baseFwd = -toPlayer;
-        return ok;
-    }
-
     private void SyncFacingOffset()
     {
         facingOffsetVelocity = 0f;
-        facingOffset = TryGetFacingBase(out Vector3 baseFwd)
-            ? Vector3.SignedAngle(baseFwd, Vector3.ProjectOnPlane(transform.forward, Vector3.up), Vector3.up)
+        facingOffset = motor.TryGetOrbitDirection(out Vector3 toPlayer)
+            ? Vector3.SignedAngle(-toPlayer, Vector3.ProjectOnPlane(transform.forward, Vector3.up), Vector3.up)
             : 0f;
         facingTargetOffset = facingOffset;
     }
@@ -592,7 +505,7 @@ public class PlayerController : MonoBehaviour
             snappedZ = Mathf.RoundToInt(Mathf.Cos(snappedAngle));
         }
         airLocalVelocity = new Vector2(snappedX, snappedZ) * Jump.airSpeed * AirSpeedMultiplier;
-        velocity = AirLocalToWorld(airLocalVelocity);
+        velocity = motor.LocalToWorld(airLocalVelocity);
         animator.SetFloat(DirXHash, snappedX);
         animator.SetFloat(DirZHash, snappedZ);
 
@@ -607,7 +520,7 @@ public class PlayerController : MonoBehaviour
     /// Optional air control steers it past the dead zone; releasing keeps momentum.
     private void TickJump()
     {
-        FaceTarget();
+        motor.FaceTarget();
 
         if (Jump.airControl > 0f)
         {
@@ -619,15 +532,14 @@ public class PlayerController : MonoBehaviour
                 airLocalVelocity = Vector2.MoveTowards(airLocalVelocity, targetLocal, Jump.airControl * Time.deltaTime);
             }
         }
-        velocity = AirLocalToWorld(airLocalVelocity);
+        velocity = motor.LocalToWorld(airLocalVelocity);
 
         verticalVelocity += (verticalVelocity > 0f ? gravityUp : gravityDown) * Time.deltaTime;
-        Vector3 horizontal = OrbitStep(velocity * Time.deltaTime);
-        controller.Move(horizontal + Vector3.up * verticalVelocity * Time.deltaTime);
+        motor.MoveAir(velocity * Time.deltaTime, verticalVelocity * Time.deltaTime);
 
         animator.SetFloat(VerticalVelocityHash, verticalVelocity);
 
-        if (controller.isGrounded && verticalVelocity <= 0f)
+        if (motor.IsGrounded && verticalVelocity <= 0f)
         {
             verticalVelocity = 0f;
             jumpCooldownTimer = Jump.cooldown;
@@ -661,12 +573,6 @@ public class PlayerController : MonoBehaviour
             EnterLocomotion(crossfade: false); // Land -> Locomotion via the Animator
             dashLockoutTimer = Dash.lockoutAfterLanding;
         }
-    }
-
-    private Vector3 AirLocalToWorld(Vector2 local)
-    {
-        GetLocomotionBasis(out Vector3 fwd, out Vector3 right);
-        return right * local.x + fwd * local.y;
     }
 
     // ================================================================ Dash
@@ -737,8 +643,8 @@ public class PlayerController : MonoBehaviour
     /// dash (still can't pass attackRange). Outside: a decelerating straight dash.
     private void LaunchDash(Vector2 aimInput)
     {
-        bool nearTarget = IsInCombatRange() && target != null;
-        Vector3 dashDir = GetOrbitAwareFourDirection(aimInput, out int snappedX, out int snappedZ);
+        bool nearTarget = IsInCombatRange();
+        Vector3 dashDir = SnapToFourDirections(aimInput, out int snappedX, out int snappedZ);
 
         animator.SetFloat(DirXHash, snappedX);
         animator.SetFloat(DirZHash, snappedZ);
@@ -750,9 +656,9 @@ public class PlayerController : MonoBehaviour
 
         if (dashIsOrbital)
         {
-            TryGetOrbitDirection(out Vector3 toPlayer);
+            motor.TryGetOrbitDirection(out Vector3 toPlayer);
             float sign = Mathf.Sign(Vector3.Dot(dashDir, Vector3.Cross(Vector3.up, toPlayer)));
-            float radius = Mathf.Max(orbitRadius, 0.01f);
+            float radius = Mathf.Max(motor.OrbitRadius, 0.01f);
 
             dashOrbitAngleRemaining = Dash.sideDodgeAngle * sign;
 
@@ -790,14 +696,13 @@ public class PlayerController : MonoBehaviour
 
     private void TickDash()
     {
-        FaceTarget();
-        Vector3 stick = Vector3.up * Loco.groundStickForce * Time.deltaTime;
+        motor.FaceTarget();
 
         if (dashIsOrbital)
         {
             float angularDecel = Dash.solveAngleFromDuration
                 ? dashOrbitAngularDecel
-                : (Dash.deceleration * dashLaunchMultiplier / Mathf.Max(orbitRadius, 0.01f)) * Mathf.Rad2Deg;
+                : (Dash.deceleration * dashLaunchMultiplier / Mathf.Max(motor.OrbitRadius, 0.01f)) * Mathf.Rad2Deg;
 
             dashOrbitAngularSpeed = Mathf.MoveTowards(dashOrbitAngularSpeed, 0f, angularDecel * Time.deltaTime);
 
@@ -806,8 +711,7 @@ public class PlayerController : MonoBehaviour
                 step = dashOrbitAngleRemaining; // never overshoot the angle
             dashOrbitAngleRemaining -= step;
 
-            TryGetOrbitDirection(out Vector3 toPlayer);
-            controller.Move(OrbitCorrection(Quaternion.AngleAxis(step, Vector3.up) * toPlayer) + stick);
+            motor.RotateAroundTarget(step);
 
             if (Mathf.Abs(dashOrbitAngleRemaining) <= 0.05f || Mathf.Abs(dashOrbitAngularSpeed) <= 0.5f)
                 EndDash();
@@ -815,14 +719,14 @@ public class PlayerController : MonoBehaviour
         else if (dashIsFixedDistance)
         {
             float step = Mathf.Min(Dash.inRangeSpeed * dashLaunchMultiplier * Time.deltaTime, dashFixedRemaining);
-            controller.Move(ClampApproachToMinDistance(velocity.normalized * step) + stick);
+            motor.MoveStraightClamped(velocity.normalized * step);
             dashFixedRemaining -= step;
             if (dashFixedRemaining <= 0f) EndDash();
         }
         else
         {
             velocity = Vector3.MoveTowards(velocity, Vector3.zero, Dash.deceleration * dashLaunchMultiplier * Time.deltaTime);
-            controller.Move(ClampApproachToMinDistance(velocity * Time.deltaTime) + stick);
+            motor.MoveStraightClamped(velocity * Time.deltaTime);
             if (velocity.sqrMagnitude <= 0.0001f) EndDash();
         }
     }
@@ -844,9 +748,10 @@ public class PlayerController : MonoBehaviour
         jumpLockoutTimer = Jump.lockoutAfterDash;
     }
 
-    private Vector3 GetOrbitAwareFourDirection(Vector2 mv, out int snappedX, out int snappedZ)
+    /// Snaps the stick to forward/back/left/right in the orbit frame.
+    private Vector3 SnapToFourDirections(Vector2 mv, out int snappedX, out int snappedZ)
     {
-        GetLocomotionBasis(out Vector3 fwd, out Vector3 right);
+        motor.GetBasis(out Vector3 fwd, out Vector3 right);
         snappedX = 0;
         snappedZ = 0;
         if (mv.sqrMagnitude < 0.0001f) return Vector3.zero;
@@ -906,9 +811,9 @@ public class PlayerController : MonoBehaviour
     /// Static hold: faces the target, keeps the orbit distance, no movement.
     private void TickGuard()
     {
-        FaceTarget();
+        motor.FaceTarget();
         velocity = Vector3.zero;
-        Move(velocity);
+        motor.Move(velocity);
     }
 
     // ================================================================ RCT
@@ -953,9 +858,9 @@ public class PlayerController : MonoBehaviour
     public void BeginAttackStep(float distance, float duration)
     {
         attackStepRemaining = 0f;
-        if (target == null || duration <= 0f || distance <= 0f) return;
+        if (Target == null || duration <= 0f || distance <= 0f) return;
 
-        Vector3 dir = target.position - transform.position;
+        Vector3 dir = Target.position - transform.position;
         dir.y = 0f;
         attackStepDirection = dir.sqrMagnitude > 0.0001f ? dir.normalized : transform.forward;
         attackStepRemaining = distance;
@@ -964,12 +869,12 @@ public class PlayerController : MonoBehaviour
 
     private void TickAttacking()
     {
-        FaceTarget();
+        motor.FaceTarget();
 
         if (attackStepRemaining > 0f)
         {
             float step = Mathf.Min(attackStepSpeed * Time.deltaTime, attackStepRemaining);
-            controller.Move(ClampApproachToMinDistance(attackStepDirection * step) + Vector3.up * Loco.groundStickForce * Time.deltaTime);
+            motor.MoveStraightClamped(attackStepDirection * step);
             attackStepRemaining -= step;
         }
 
@@ -990,124 +895,10 @@ public class PlayerController : MonoBehaviour
     private void TickHitstun()
     {
         velocity = Vector3.MoveTowards(velocity, Vector3.zero, Combat.knockbackDecay * Time.deltaTime);
-        controller.Move((velocity + Vector3.up * Loco.groundStickForce) * Time.deltaTime);
+        motor.MoveStraight(velocity * Time.deltaTime);
 
         hitstunTimer -= Time.deltaTime;
         if (hitstunTimer <= 0f) EnterLocomotion();
-    }
-
-    // ================================================================ Orbit movement
-
-    // Only the INTENDED distance to the target is stored; direction is read fresh from the
-    // real position. Drift is a radius problem, so an authoritative radius is enough.
-    // Radius rule (end of Update): a frame that didn't move along the orbit re-reads the
-    // radius from the real distance. Orbital frames keep it and change it only through
-    // deliberate toward/away movement.
-    private float orbitRadius;
-    private bool movedOnOrbitThisFrame;
-
-    /// Stick input frame: fwd = toward the target (or the body's forward with no target).
-    private void GetLocomotionBasis(out Vector3 fwd, out Vector3 right)
-    {
-        if (TryGetOrbitDirection(out Vector3 toPlayer))
-        {
-            fwd = -toPlayer;
-            right = Vector3.Cross(Vector3.up, fwd);
-        }
-        else
-        {
-            fwd = transform.forward;
-            right = transform.right;
-        }
-    }
-
-    /// Flat direction from the target to the player.
-    private bool TryGetOrbitDirection(out Vector3 dir)
-    {
-        dir = Vector3.forward;
-        if (target == null) return false;
-        Vector3 toPlayer = transform.position - target.position;
-        toPlayer.y = 0f;
-        if (toPlayer.sqrMagnitude < 0.0001f) return false;
-        dir = toPlayer.normalized;
-        return true;
-    }
-
-    private void SyncOrbitRadius()
-    {
-        if (target == null) return;
-        Vector3 toPlayer = transform.position - target.position;
-        toPlayer.y = 0f;
-        orbitRadius = toPlayer.magnitude;
-    }
-
-    /// Grounded move along the orbit, plus the ground-stick force.
-    private void Move(Vector3 horizontalVelocity)
-    {
-        Vector3 displacement = OrbitStep(horizontalVelocity * Time.deltaTime);
-        controller.Move(displacement + Vector3.up * Loco.groundStickForce * Time.deltaTime);
-    }
-
-    /// Toward/away changes the intended radius; sideways becomes an arc (length / radius
-    /// = angle). Returns the displacement that puts the character there. No target: the
-    /// displacement passes through unchanged.
-    private Vector3 OrbitStep(Vector3 desiredDisplacement)
-    {
-        if (!TryGetOrbitDirection(out Vector3 radialDir)) return desiredDisplacement;
-        if (orbitRadius <= 0f) SyncOrbitRadius();
-
-        Vector3 tangentDir = Vector3.Cross(Vector3.up, radialDir);
-        orbitRadius = Mathf.Max(0.01f, orbitRadius + Vector3.Dot(desiredDisplacement, radialDir));
-        float angleDeg = Vector3.Dot(desiredDisplacement, tangentDir) / orbitRadius * Mathf.Rad2Deg;
-
-        return OrbitCorrection(Quaternion.AngleAxis(angleDeg, Vector3.up) * radialDir);
-    }
-
-    /// Displacement to newDir at the intended radius. Shared by OrbitStep and the side dash.
-    private Vector3 OrbitCorrection(Vector3 newDir)
-    {
-        movedOnOrbitThisFrame = true;
-        Vector3 correction = target.position + newDir * orbitRadius - transform.position;
-        correction.y = 0f;
-        return correction;
-    }
-
-    /// Pushes the player back out to attackRange if this frame got closer.
-    private void ClampMinDistanceToTarget()
-    {
-        if (target == null) return;
-
-        Vector3 toPlayer = transform.position - target.position;
-        toPlayer.y = 0f;
-        float distance = toPlayer.magnitude;
-
-        if (distance < Combat.attackRange && distance > 0.0001f)
-        {
-            Vector3 correction = target.position + toPlayer.normalized * Combat.attackRange - transform.position;
-            correction.y = 0f;
-            controller.Move(correction + Vector3.up * Loco.groundStickForce * Time.deltaTime);
-            orbitRadius = Combat.attackRange;
-        }
-    }
-
-    /// Trims the toward-target part of a straight move (attack step, straight dash) so it
-    /// stops at attackRange instead of overshooting and being pushed back a frame later.
-    private Vector3 ClampApproachToMinDistance(Vector3 desiredDisplacement)
-    {
-        if (target == null) return desiredDisplacement;
-
-        Vector3 toPlayer = transform.position - target.position;
-        toPlayer.y = 0f;
-        float currentDistance = toPlayer.magnitude;
-        if (currentDistance <= 0.0001f) return desiredDisplacement;
-
-        Vector3 towardTarget = -toPlayer.normalized;
-        float approach = Vector3.Dot(desiredDisplacement, towardTarget);
-        float maxApproach = Mathf.Max(0f, currentDistance - Combat.attackRange);
-        if (approach > maxApproach)
-            desiredDisplacement -= towardTarget * (approach - maxApproach);
-
-        return desiredDisplacement;
     }
 
     // ================================================================ Debug drawing
@@ -1115,20 +906,20 @@ public class PlayerController : MonoBehaviour
     private void OnGUI()
     {
         if (!showLockOnDebugOverlay) return;
-        var style = new GUIStyle { fontSize = 20, normal = { textColor = target != null ? Color.yellow : Color.white } };
-        GUI.Label(new Rect(10, 10, 400, 60), $"Target: {(target != null ? target.name : "none")}", style);
+        var style = new GUIStyle { fontSize = 20, normal = { textColor = Target != null ? Color.yellow : Color.white } };
+        GUI.Label(new Rect(10, 10, 400, 60), $"Target: {(Target != null ? Target.name : "none")}", style);
     }
 
     private void OnDrawGizmos()
     {
-        if (target == null || settings == null) return;
+        if (Target == null || settings == null) return;
 
         Gizmos.color = Color.cyan;
-        DrawGizmoCircle(target.position, Combat.combatRange, 48);
+        DrawGizmoCircle(Target.position, Combat.combatRange, 48);
         Gizmos.color = Color.red;
-        DrawGizmoCircle(target.position, Combat.attackRange, 32);
+        DrawGizmoCircle(Target.position, Combat.attackRange, 32);
         Gizmos.color = Color.yellow;
-        Gizmos.DrawWireSphere(target.position + Vector3.up * 1.8f, 0.3f);
+        Gizmos.DrawWireSphere(Target.position + Vector3.up * 1.8f, 0.3f);
     }
 
     private static void DrawGizmoCircle(Vector3 center, float radius, int segments)
